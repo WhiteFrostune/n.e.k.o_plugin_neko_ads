@@ -1,10 +1,13 @@
 [plugin]
 id = "neko_ads"
 name = "猫娘广告部"
-description = "用户主动开局的复古广告整蛊小游戏。宣传猫娘计划，推荐真实市场插件，支持安全词退出。"
+description = "复古广告整蛊小游戏，v0.1.0 为独立游戏页原型。宣传猫娘计划，推荐真实市场插件，支持安全词退出。"
 version = "0.1.0"
 entry = "plugin.plugins.neko_ads:NekoAdsPlugin"
 passive = true
+
+[plugin.author]
+name = "WhiteFrostune"
 
 [plugin.sdk]
 recommended = ">=0.1.0,<0.2.0"
