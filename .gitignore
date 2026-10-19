@@ -1,0 +1,22 @@
+# Runtime data, local settings and credentials
+data/
+config.json
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.log
+
+# Development artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+node_modules/
+test-results/
+playwright-report/
+coverage/
+.DS_Store
+Thumbs.db

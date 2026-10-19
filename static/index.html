@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>猫娘广告部 · 杂鱼桌面占领计划</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="engine.js" defer></script>
+  <script src="main.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <a class="brand" href="./" aria-label="猫娘广告部首页">N<span>♡</span>K<span class="brand-dot">O</span><small>猫娘广告部</small></a>
+    <div class="edition">猫娘计划官方非正经宣传站<br><span>EST. 2005-ish / VOL. 001</span></div>
+    <span class="issue">今日宜 · 补猫</span>
+  </header>
+  <main id="lobby">
+    <div class="ticker"><span>★ 猫娘计划 ★ 桌面陪伴 ★ 主人专属 ★ 本广告部今日正常胡闹 ★</span></div>
+    <section class="hero">
+      <div class="hero-copy">
+        <div class="eyebrow">NEKO ADVERTISING DEPARTMENT</div>
+        <h1>你的桌面，<br>本小姐<span>承包了。</span></h1>
+        <p class="lead">古早弹窗 × 猫娘宣传 × 一点点坏心眼</p>
+        <div class="stamp">纯属<br><strong>整活</strong></div>
+        <div class="consent">
+          <p>输入安全词「<strong>广告下班</strong>」或按 <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Q</kbd> 可以立即结束。</p>
+          <small>在本游戏页生效；安全词可输入下方聊天框。离开游戏页会自动结束。</small>
+          <label class="voice-option"><input type="checkbox" id="voice" checked> 日语嘲讽朗读 <span id="voice-status">检查可用语音…</span></label>
+          <button id="start" class="start-button" disabled>正在连接广告部…</button>
+          <p id="connection" role="status">请先在插件管理器启动「猫娘广告部」。</p>
+        </div>
+      </div>
+      <aside class="hero-poster" aria-label="猫娘宣传海报">
+        <div class="poster-top">重磅消息 / BREAKING MEWS</div>
+        <div class="poster-cat" aria-hidden="true">ฅ</div>
+        <p>是主人<br>就来<span>养我！</span></p>
+        <div class="poster-bottom">开局一只猫 · 陪伴全靠聊</div>
+        <div class="sticker">今日热喵<br>100% 可爱</div>
+      </aside>
+    </section>
+    <section class="feature-strip" aria-label="广告栏目">
+      <div><span>01 / POP-UP</span><strong>复古弹窗</strong><p>熟悉的配色，久违的“惊喜”。</p></div>
+      <div><span>02 / PLUGIN</span><strong>真实推荐</strong><p>宣传可以夸张，插件功能有据可查。</p></div>
+      <div><span>03 / KOAKUMA</span><strong>猫娘监工</strong><p>主人每一次挣扎，她都看在眼里。</p></div>
+    </section>
+    <footer>内容仅宣传猫娘计划与真实市场插件。没有付费广告，没有自动安装。<br><span id="catalog-status">正在查看插件市场…</span></footer>
+  </main>
+  <section id="playfield" hidden aria-label="广告小游戏">
+    <div class="desktop-heading"><span>主人の桌面</span><small>NEKO OS · 猫娘广告部正在营业</small></div>
+    <div class="desktop-icons" aria-hidden="true"><div>ฅ<small>猫娘计划</small></div><div>▦<small>插件市场</small></div><div>♡<small>主人收藏</small></div></div>
+    <div class="desktop-watermark" aria-hidden="true">NEKO<br><span>AD INVASION</span></div>
+    <div id="ads" aria-label="广告弹窗"></div>
+    <aside id="companion" data-mood="smug" aria-label="猫娘反馈">
+      <div id="speech" role="status">广告部，开业！</div>
+      <div class="neko-face" aria-hidden="true"><i class="ear left"></i><i class="ear right"></i><div class="hair"></div><div class="face"><span class="eye left"></span><span class="eye right"></span><span class="blush left"></span><span class="blush right"></span><span class="mouth">ω</span></div><div class="ribbon">♥</div></div>
+      <span class="name-tag">猫娘广告部 · 今日值班</span>
+    </aside>
+    <div class="taskbar"><span>ฅ NEKO</span><span id="score">营业准备中</span><span>広告中 ♡</span></div>
+  </section>
+  <section id="result" hidden aria-label="游戏结束">
+    <div class="eyebrow">ADVERTISING DEPARTMENT / CLOSED</div>
+    <h2>广告部已下班。</h2>
+    <p id="result-message" role="status">所有广告与语音均已停止。</p>
+    <p id="result-score"></p>
+    <button id="back" class="start-button">回到开局页面</button>
+  </section>
+  <form id="chat" hidden autocomplete="off">
+    <label for="chat-input">和猫娘说话</label>
+    <input id="chat-input" maxlength="200" placeholder="主人，有什么想说的？" aria-label="和猫娘说话或输入安全词">
+    <button type="submit">发送 ↵</button>
+  </form>
+</body>
+</html>

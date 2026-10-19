@@ -1,0 +1,25 @@
+[plugin]
+id = "neko_ads"
+name = "猫娘广告部"
+description = "用户主动开局的复古广告整蛊小游戏。宣传猫娘计划，推荐真实市场插件，支持安全词退出。"
+version = "0.1.0"
+entry = "plugin.plugins.neko_ads:NekoAdsPlugin"
+passive = true
+
+[plugin.sdk]
+recommended = ">=0.1.0,<0.2.0"
+supported = ">=0.1.0,<0.3.0"
+
+[plugin_runtime]
+enabled = true
+auto_start = false
+
+[plugin.ui]
+enabled = true
+
+[[plugin.ui.panel]]
+id = "main"
+title = "猫娘广告部"
+entry = "static/index.html"
+context = "main"
+permissions = ["state:read", "action:call"]
