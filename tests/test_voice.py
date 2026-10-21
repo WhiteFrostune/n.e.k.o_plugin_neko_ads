@@ -4,7 +4,6 @@ import threading
 import uuid
 
 import pytest
-
 from plugin.plugins.neko_ads.desktop import LINES, DesktopController
 from plugin.plugins.neko_ads.session import AdSession
 from plugin.plugins.neko_ads.voice import VoiceBank

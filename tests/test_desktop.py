@@ -6,7 +6,6 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
-
 from plugin.plugins.neko_ads.desktop import DesktopController
 from plugin.plugins.neko_ads.session import AdSession
 
