@@ -1,5 +1,6 @@
 # Runtime data, local settings and credentials
 data/
+static/voice-cache/
 config.json
 .env
 .env.*

@@ -9,6 +9,8 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Callable
 
+from .connection import LEASE_SECONDS
+
 
 class AdSession:
     def __init__(self, clock: Callable[[], float] = time.monotonic):
@@ -19,7 +21,7 @@ class AdSession:
         self._retired: OrderedDict[str, float] = OrderedDict()
         self._ready = False
         self._epoch = str(uuid.uuid4())
-        self.lease_seconds = 8
+        self.lease_seconds = LEASE_SECONDS
 
     @staticmethod
     def valid_id(round_id: str) -> bool:
@@ -27,7 +29,7 @@ class AdSession:
 
     def _retire(self, round_id: str) -> None:
         self._retired[round_id] = self._clock()
-        # Requests time out after 2.5s in the UI; retain tombstones far longer.
+        # Retain tombstones far longer than any bounded reconnect/request.
         while self._retired and next(iter(self._retired.values())) < self._clock() - 600:
             self._retired.popitem(last=False)
 
@@ -82,4 +84,5 @@ class AdSession:
     def snapshot(self) -> dict:
         with self._lock:
             self._expire()
-            return {"active": self._active is not None, "ready": self._ready, "epoch": self._epoch}
+            return {"active": self._active is not None, "ready": self._ready, "epoch": self._epoch,
+                    "retired_round_ids": list(self._retired)[-64:]}

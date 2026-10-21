@@ -1,218 +1,189 @@
 (function () {
   'use strict';
+  const base = '/plugin/neko_ads/hosted-ui', storage = 'neko-ads-custom-exit-shortcut';
   const $ = id => document.getElementById(id);
-  const BASE = '/plugin/neko_ads/hosted-ui';
-  let roundId = null;
-  let starting = false;
-  let revision = 0;
-  let pollTimer = null;
-  let voiceEnabled = true;
-  let japaneseVoice = null;
-  let marketBase = null;
-  let keyBuffer = '';
-  let keyTime = 0;
-  let connected = false;
-  let epoch = '';
-  const speech = window.speechSynthesis;
-
-  async function request(url, options = {}) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 2500);
+  let state = null, available = false, selected = localStorage.getItem(storage) || 'Ctrl+Shift+1';
+  let pending = null, stopping = false, switching = null, runtime = 'unknown', recording = false, revision = 0, message = '';
+  let runtimeConfirmation = null;
+  let changingVoice = false;
+  function metadata(plugin) {
+    const label = $('plugin-version');
+    if (!label) return;
+    const version = plugin && typeof plugin.version === 'string' ? plugin.version.trim() : '';
+    label.textContent = version ? (/^v/i.test(version) ? version : 'v' + version) : '版本暂不可用';
+  }
+  function notice() { $('shortcut').value = selected; $('notice').textContent = '输入安全词「广告下班」或按 ' + selected + ' 可以立即结束。'; }
+  function render() {
+    const active = !!(state && state.active), ready = !!(available && state && state.ready);
+    if (runtimeConfirmation === 'start' && ready) {
+      runtimeConfirmation = null; message = active ? '' : '插件已启动，正在待机。想玩时再点击下方开局按钮。';
+    } else if (runtimeConfirmation === 'stop' && available && runtime === 'stopped') {
+      runtimeConfirmation = null; message = '插件已关闭，广告与声音已停止。';
+    }
+    const running = ready || runtime === 'running';
+    const phase = switching ? switching === 'stop' ? 'disabling' : 'enabling' : stopping ? 'stopping' : pending ? 'starting' : !available ? (active ? 'reconnecting' : 'unavailable') : !ready ? 'disabled' : active ? 'playing' : state.desktop_ready ? 'standby' : 'waiting';
+    document.body.dataset.phase = phase;
+    const phaseLabel = $('phase-label');
+    if (phaseLabel) phaseLabel.textContent = ({enabling:'正在启动', disabling:'正在关闭', starting:'正在开局', stopping:'正在结束', reconnecting:'正在重连', unavailable:'等待连接', disabled:'未启用', playing:'游戏进行中', standby:'已启用 · 待命', waiting:'等待主界面'})[phase];
+    $('enable').disabled = !!switching || !['running', 'stopped'].includes(runtime);
+    $('enable').textContent = switching ? switching === 'stop' ? '正在关闭插件……' : '正在启动插件……' : running ? '一键关闭插件' : '一键启动插件';
+    $('start').disabled = !ready || !state.desktop_ready || active || !!pending || stopping || !!switching;
+    $('stop').disabled = (!active && !pending) || stopping || !!switching;
+    $('start').textContent = pending ? '杂鱼♡准备好挨广告吧……' : '杂鱼♡让本喵占领桌面！';
+    if (phaseLabel && !pending) $('start').textContent = '杂鱼♡让本喵\n占领桌面！';
+    $('stop').textContent = stopping ? '杂鱼♡认输处理中……' : pending ? '杂鱼♡这就反悔啦？' : '杂鱼♡这就认输啦？';
+    $('stop').setAttribute('aria-label', pending ? '取消开局：杂鱼♡这就反悔啦？' : '结束本局：杂鱼♡这就认输啦？');
+    $('shortcut').disabled = !!pending || stopping || !!switching;
+    $('voice').disabled = !ready || !!pending || stopping || !!switching || changingVoice;
+    const preparation = state && state.voice_preparation;
+    const count = preparation ? preparation.ready + '/' + preparation.total : '0/9';
+    $('voice-status').textContent = !ready ? '插件启动后静默准备语音。' : state.voice_enabled === false ? '语音已关闭' : !preparation || preparation.state === 'waiting' ? '等待当前猫娘，语音会静默准备。' :
+      preparation.state === 'ready' ? '当前猫娘语音已就绪 · ' + count : preparation.state === 'paused' ? '语音准备已暂停 · ' + count :
+      ['partial','unavailable'].includes(preparation.state) ? '部分语音暂未就绪 · ' + count + '，可重试。' : '正在静默准备语音 · ' + count;
+    if (phaseLabel && ready && state.voice_enabled !== false && preparation && preparation.state === 'ready') $('voice-status').textContent = '语音已就绪 · ' + count;
+    $('voice-retry').disabled = !ready || !state.voice_enabled || !preparation || !['paused','partial','unavailable'].includes(preparation.state);
+    $('status').textContent = ({
+      enabling: '正在启动插件，完成后进入待机……',
+      disabling: '正在关闭插件，本局广告与声音一并结束……',
+      starting: '正在开局，正在确认主界面和退出快捷键……', stopping: '正在结束本局……',
+      reconnecting: '连接暂时中断，正在重连。可在猫娘主界面输入安全词或按退出快捷键。',
+      unavailable: runtime === 'running' ? '插件正在运行，等待控制页连接恢复。' : '插件服务连接不可用，请检查宿主是否正在运行。',
+      disabled: '插件未启动，点击上方“一键启动插件”进入待机。',
+      playing: '游戏进行中', standby: '插件已启用 · 待机中', waiting: '插件已启用 · 等待猫娘主界面连接',
+    })[phase];
+    const name = state && (active ? state.character : state.desktop && state.desktop.character);
+    $('connection').textContent = name ? '当前猫娘：' + name : ready ? '请打开或重新加载猫娘主界面后再开局。' : '';
+    $('message').textContent = message;
+  }
+  async function request(path, options = {}, timeout = 6000) {
+    const abort = new AbortController(), timer = setTimeout(() => abort.abort(), timeout);
     try {
-      const response = await fetch(url, {...options, signal: controller.signal, cache: 'no-store'});
-      if (!response.ok) throw new Error('request_failed');
-      return await response.json();
+      const response = await fetch(path.startsWith('/plugin/') ? path : base + path, {...options, signal: abort.signal, cache: 'no-store'});
+      const data = await response.json();
+      if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : '插件连接不可用');
+      return data;
     } finally { clearTimeout(timer); }
   }
-  async function action(name, args = {}, keepalive = false) {
-    const envelope = await request(`${BASE}/action/${name}`, {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({args, kind: 'panel', surface_id: 'main', locale: 'zh-CN'}), keepalive,
-    });
-    const result = envelope.result;
-    if (!result || result.success === false) throw new Error('action_failed');
-    return result.data || result;
+  async function command(command, payload) {
+    const data = await request('/action/desktop_command', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({kind:'panel',surface_id:'main',args:{command,payload}})});
+    const result = data.result || {};
+    if (result.success === false || result.status === 'error' || result.error) throw new Error(result.error && (result.error.message || result.error) || '广告操作失败');
+    return result.data || result.value || result;
   }
-  function retire(id) {
-    if (id) action('stop_game', {round_id: id}, true).catch(() => {});
+  async function context() {
+    const data = await request('/context?kind=panel&id=main');
+    // Host metadata comes from this installation's manifest, even while stopped.
+    // Both surfaces reuse this request; version display never adds another poll.
+    metadata(data.plugin);
+    if (!data.state || typeof data.state.ready !== 'boolean' || typeof data.state.active !== 'boolean') throw new Error('无效状态');
+    return data.state;
   }
-  function updateVoices() {
-    japaneseVoice = speech && speech.getVoices().find(v => /^ja(?:-|_)/i.test(v.lang));
-    $('voice-status').textContent = japaneseVoice ? '使用系统日语语音，非角色原声' : '未发现日语语音，使用文字反馈';
-    $('voice').disabled = !japaneseVoice;
-    if (!japaneseVoice) $('voice').checked = false;
-  }
-  if (speech) speech.addEventListener('voiceschanged', updateVoices);
-  updateVoices();
-
-  const game = new NekoAds.Game({
-    onChange: render,
-    onFeedback: ([text, japanese, mood], speak) => {
-      $('speech').textContent = text;
-      $('companion').dataset.mood = mood;
-      if (speak && voiceEnabled && japaneseVoice && speech) {
-        try {
-          speech.cancel();
-          const utterance = new SpeechSynthesisUtterance(japanese);
-          utterance.voice = japaneseVoice;
-          utterance.lang = 'ja-JP'; utterance.rate = 1.08; utterance.pitch = 1.18; utterance.volume = 0.65;
-          speech.speak(utterance);
-        } catch (_) { voiceEnabled = false; }
-      }
-    },
-    onStop: reason => {
-      revision++;
-      starting = false;
-      clearTimeout(pollTimer);
-      if (speech) speech.cancel();
-      retire(roundId);
-      roundId = null;
-      keyBuffer = '';
-      $('chat-input').value = '';
-      document.body.classList.remove('playing');
-      $('playfield').hidden = $('chat').hidden = $('lobby').hidden = true;
-      $('result').hidden = false;
-      $('result-message').textContent = reason === 'connection' ? '与插件的连接已断开，本局已自动结束。所有广告与语音均已停止。' : '所有广告与语音均已停止。';
-      $('result-score').textContent = `本局关掉 ${game.closed} 张广告 · 尝试 ${game.attempts} 次`;
-      $('back').focus();
-    },
-  });
-
-  function node(tag, className, text) {
-    const el = document.createElement(tag);
-    if (className) el.className = className;
-    if (text !== undefined) el.textContent = text;
-    return el;
-  }
-  function render() {
-    const focusedId = document.activeElement && document.activeElement.dataset.closeId;
-    $('ads').replaceChildren();
-    for (const card of game.cards) {
-      const ad = node('article', `ad ${card.kind}`);
-      ad.dataset.cardId = card.id;
-      ad.setAttribute('aria-label', card.title);
-      const bar = node('div', 'ad-bar');
-      bar.append(node('span', '', card.subtitle));
-      const close = node('button', 'ad-close', '×');
-      close.type = 'button'; close.dataset.closeId = card.id;
-      close.setAttribute('aria-label', `关闭广告：${card.title}`);
-      close.addEventListener('pointerenter', e => { if (e.pointerType !== 'touch') game.hover(card.id); });
-      close.addEventListener('click', () => game.close(card.id));
-      bar.append(close);
-      const content = node('div', 'ad-content');
-      content.append(node('span', 'ad-badge', card.badge), node('h2', '', card.title), node('p', '', card.body));
-      const link = node('a', 'ad-cta', card.action);
-      link.href = card.kind === 'market' ? '/ui/market' : card.pluginId && marketBase ? `${marketBase}/#/plugin/${encodeURIComponent(card.pluginId)}` : 'https://github.com/Project-N-E-K-O/N.E.K.O';
-      link.target = '_blank'; link.rel = 'noopener noreferrer';
-      link.addEventListener('click', () => game.feedback('view'));
-      content.append(link);
-      const later = node('button', 'ad-later', '稍后提醒');
-      later.type = 'button'; later.addEventListener('click', () => game.postpone(card.id));
-      content.append(later);
-      ad.append(bar, content, node('div', 'ad-footer', card.pluginId ? '真实插件功能以上方介绍为准 · 猫娘广告部倾情吆喝' : '猫娘计划宣传 · 猫娘广告部出品'));
-      $('ads').append(ad);
-      const area = $('ads');
-      ad.style.left = `${Math.round(card.x * Math.max(0, area.clientWidth - ad.offsetWidth))}px`;
-      ad.style.top = `${Math.round(card.y * Math.max(0, area.clientHeight - ad.offsetHeight))}px`;
-      if (focusedId === String(card.id)) close.focus({preventScroll: true});
-    }
-    $('score').textContent = `已关 ${game.closed} 张 / 猫娘还在营业`;
-  }
-
-  async function probe() {
+  async function update() {
+    const version = revision;
     try {
-      const context = await request(`${BASE}/context?kind=panel&id=main&locale=zh-CN`);
-      connected = context.state && context.state.ready === true;
-      epoch = context.state && context.state.epoch || '';
-    } catch (_) { connected = false; }
-    $('start').disabled = !connected;
-    $('start').textContent = connected ? '确认，开始游戏 ↗' : '重新连接广告部';
-    // Allow retry even when the plugin was started after this page loaded.
-    $('start').disabled = false;
-    $('connection').textContent = connected ? '广告部已就绪，等待主人开局。' : '请先启动本插件，再点击重新连接。';
-  }
-  async function heartbeat(id) {
-    if (!game.active || roundId !== id) return;
-    try {
-      const status = await action('heartbeat', {round_id: id});
-      if (!game.active || roundId !== id) return;
-      if (status.active !== true) { game.stop('connection'); return; }
-      pollTimer = setTimeout(() => heartbeat(id), 1000);
-    } catch (_) { if (game.active && roundId === id) game.stop('connection'); }
-  }
-  $('start').addEventListener('click', async () => {
-    if (!connected) { await probe(); return; }
-    if (starting || game.active) return;
-    starting = true;
-    $('start').disabled = true;
-    $('connection').textContent = '正在开局…';
-    const ticket = ++revision;
-    const id = crypto.randomUUID();
-    roundId = id;
-    try {
-      const result = await action('start_game', {round_id: id, confirmed: true, epoch});
-      if (ticket !== revision || document.hidden) { retire(id); return; }
-      if (result.active !== true || result.round_id !== id) throw new Error('start_rejected');
-      starting = false;
-      voiceEnabled = $('voice').checked;
-      $('lobby').hidden = $('result').hidden = true;
-      $('playfield').hidden = $('chat').hidden = false;
-      document.body.classList.add('playing');
-      game.start();
-      $('chat-input').focus({preventScroll: true});
-      heartbeat(id);
-    } catch (error) {
-      console.warn('Neko Ads start failed:', error);
-      if (ticket === revision) game.stop('connection');
-      else retire(id);
-    } finally { if (ticket === revision) { starting = false; $('start').disabled = false; } }
-  });
-  $('back').addEventListener('click', () => {
-    $('result').hidden = true; $('lobby').hidden = false;
-    probe();
-  });
-  $('chat-input').addEventListener('input', e => game.input(e.target.value));
-  $('chat-input').addEventListener('compositionend', e => game.input(e.target.value));
-  $('chat').addEventListener('submit', e => {
-    e.preventDefault();
-    if (!game.input($('chat-input').value) && game.active && $('chat-input').value.trim()) {
-      game.feedback('fake'); $('chat-input').value = '';
-    }
-  });
-  document.addEventListener('keydown', e => {
-    if (!game.active && !starting) return;
-    if (game.key(e)) { e.preventDefault(); e.stopImmediatePropagation(); return; }
-    if (e.isComposing || e.ctrlKey || e.metaKey || e.altKey) return;
-    if (e.key.length === 1) {
-      if (Date.now() - keyTime > 5000) keyBuffer = '';
-      keyTime = Date.now(); keyBuffer = (keyBuffer + e.key).slice(-20);
-      game.input(keyBuffer);
-    }
-  }, true);
-  // Captures committed IME text even if focus moved away from the chat input.
-  document.addEventListener('compositionend', e => {
-    if (game.active || starting) game.input(e.data || '');
-  }, true);
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && (game.active || starting)) game.stop('leave');
-  });
-  window.addEventListener('pagehide', () => { if (game.active || starting) game.stop('leave'); });
-  window.addEventListener('resize', render);
-  window.addEventListener('offline', () => { if (game.active || starting) game.stop('connection'); });
-
-  async function loadCatalog() {
-    try {
-      const [catalog, status] = await Promise.all([
-        request('/market/catalog/api/v1/plugins?page=1&page_size=12'), request('/market/status'),
-      ]);
-      const url = new URL(status.market_web_url || status.market_url);
-      if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) throw new Error('invalid_market');
-      marketBase = url.origin + url.pathname.replace(/\/$/, '');
-      game.catalog = NekoAds.normalizeCatalog(catalog);
-      $('catalog-status').textContent = game.catalog.length ? `本期收到 ${game.catalog.length} 条真实插件推荐。` : '市场暂无推荐，使用猫娘计划宣传。';
+      const next = await context();
+      if (version !== revision) return;
+      state = next; available = true; runtime = state.ready ? 'running' : 'stopped';
+      if (!changingVoice) $('voice').checked = state.voice_enabled !== false;
+      if (state.active && !recording) { selected = state.shortcut; notice(); }
     } catch (_) {
-      $('catalog-status').textContent = '插件市场暂不可用，本局仅宣传猫娘计划。';
+      if (version !== revision) return;
+      available = false;
+      try {
+        // The static page remains available when the plugin process is stopped.
+        const host = await request('/plugin/status?plugin_id=neko_ads');
+        if (version !== revision) return;
+        const value = host.status && host.status.status;
+        if (value === 'running') runtime = 'running';
+        else if (['stopped', 'disabled', 'error', 'crashed', 'frozen'].includes(value)) {
+          runtime = 'stopped'; available = true; state = {...state, ready: false, active: false};
+        } else runtime = 'unknown';
+      } catch (_) { if (version === revision) runtime = 'unknown'; }
     }
+    finally { if (version === revision) render(); setTimeout(update, 2000); }
   }
-  probe(); loadCatalog();
+  $('enable').onclick = async () => {
+    if ($('enable').disabled || switching) return;
+    const action = runtime === 'running' ? 'stop' : 'start';
+    const old = pending || state && state.active && state.round_id, version = ++revision;
+    switching = action; runtimeConfirmation = null; pending = null; stopping = false; message = ''; render();
+    let completed = false;
+    try {
+      if (action === 'stop' && old) {
+        // Retire an active or in-flight round before stopping its process.
+        try { const next = await command('stop', {round_id:old}); if (version === revision) state = next; } catch (_) {}
+      }
+      const result = await request('/plugin/neko_ads/' + action, {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'}, 20000);
+      if (result.success !== true) throw new Error(action === 'stop' ? '插件关闭未成功，请查看插件日志。' : '插件启动未成功，请查看插件日志。');
+      if (version !== revision) return;
+      completed = true;
+      if (action === 'stop') {
+        runtime = 'stopped'; available = true; state = {...state, ready:false, active:false, round_id:null};
+        message = '插件已关闭，广告与声音已停止。'; return;
+      }
+      runtime = 'running';
+      const next = await context();
+      if (version !== revision) return;
+      state = next; available = true;
+      message = next.active ? '' : '插件已启动，正在待机。想玩时再点击下方开局按钮。';
+    } catch (error) {
+      if (version === revision) {
+        if (completed) available = false;
+        if (completed || error.name === 'AbortError') runtimeConfirmation = action;
+        message = completed ? '插件已启动，正在等待控制页连接。' : error.name === 'AbortError' ? '操作等待超时，正在检查插件状态。' : error.message;
+      }
+    } finally { if (version === revision) revision++; switching = null; render(); }
+  };
+  $('start').onclick = async () => {
+    if ($('start').disabled || pending || stopping || !state || !state.desktop) return;
+    const id = crypto.randomUUID(), version = ++revision;
+    pending = id; message = ''; render();
+    try { localStorage.setItem('neko-ads-current-round', JSON.stringify({round_id:id, owner:state.desktop.client_id})); } catch (_) {}
+    try {
+      const next = await command('start', {round_id:id,epoch:state.epoch,stop_epoch:state.stop_epoch,owner:state.desktop.client_id,confirmed:true,shortcut:selected,voice_enabled:$('voice').checked});
+      if (version !== revision || pending !== id) { await command('stop', {round_id:id}); return; }
+      if (!next.active || next.round_id !== id) throw new Error('本次开局未完成，请重新点击开始。');
+      state = next; available = true;
+    } catch (e) { if (version === revision) { message = e.message; void command('stop', {round_id:id}).catch(() => {}); } }
+    finally { if (version === revision) { revision++; pending = null; render(); } }
+  };
+  $('stop').onclick = async () => {
+    if ($('stop').disabled) return;
+    const id = pending || state && state.round_id, version = ++revision;
+    if (id && typeof BroadcastChannel === 'function') {
+      const exitChannel = new BroadcastChannel('neko_ads_exit');
+      exitChannel.postMessage({type:'stop', round_id:id}); exitChannel.close();
+    }
+    pending = null; stopping = true; message = ''; render();
+    try {
+      const next = await command('stop', id ? {round_id:id} : {stop_epoch:state && state.stop_epoch});
+      if (version !== revision) return;
+      state = next; available = true; message = '本局已结束，插件继续待机。';
+    } catch (_) { if (version === revision) { available = false; message = '结束请求未确认，请在猫娘主界面输入安全词或按全局退出快捷键。'; } }
+    finally { if (version === revision) { revision++; stopping = false; render(); } }
+  };
+  $('voice').onchange = async () => {
+    const enabled = $('voice').checked, version = revision; changingVoice = true; render();
+    try { const next = await command('voice', {enabled}); if (version === revision) { state = next; available = true; } }
+    catch (error) { if (version === revision) message = error.message; }
+    finally { changingVoice = false; render(); }
+  };
+  $('voice-retry').onclick = async () => {
+    if ($('voice-retry').disabled) return;
+    try { state = await command('prepare_voice', {}); render(); } catch (error) { message = error.message; render(); }
+  };
+  $('shortcut').onkeydown = async e => {
+    e.preventDefault(); if (recording || pending || stopping || switching || ['Control','Shift','Alt','Meta'].includes(e.key)) return;
+    const mods = [e.ctrlKey && 'Ctrl', e.altKey && 'Alt', e.shiftKey && 'Shift'].filter(Boolean);
+    const key = /^Digit\d$/.test(e.code) ? e.code.slice(5) : /^Key[A-Z]$/.test(e.code) ? e.code.slice(3) : /^F(?:[1-9]|10|11)$/.test(e.code) ? e.code : '';
+    if (!mods.length || !key || e.metaKey) { message = '请使用修饰键与字母、数字或 F1–F11 组合。'; render(); return; }
+    const next = [...mods,key].join('+'), version = revision; recording = true;
+    try {
+      if (state && state.active) await command('shortcut',{round_id:state.round_id,shortcut:next});
+      if (version !== revision) return;
+      revision++; selected=next; message=''; localStorage.setItem(storage,next); notice();
+    } catch(e) { if (version === revision) message=e.message; }
+    finally { recording=false; render(); }
+  };
+  notice(); render(); update();
 })();

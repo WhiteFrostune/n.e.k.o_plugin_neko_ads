@@ -1,6 +1,6 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {Game, normalizeCatalog} = require('../static/engine.js');
+const {Game, BUILTINS, normalizeCatalog} = require('../static/engine.js');
 
 function harness() {
   let time = 10000;
@@ -15,7 +15,7 @@ function harness() {
 }
 test('safe word immediately clears cards and delayed split/spawn; stale callbacks stay dead', () => {
   const {game, timers} = harness();
-  game.start(); game.cursor = 3; game.spawn();
+  game.start(); game.cursor = BUILTINS.findIndex(card => card.kind === 'market'); game.spawn();
   game.close(game.cards[1].id);
   const stale = [...timers.values()];
   assert.equal(game.input('广 告 下 班！'), true);
@@ -25,20 +25,20 @@ test('safe word immediately clears cards and delayed split/spawn; stale callback
   stale.forEach(fn => fn());
   assert.equal(game.cards.length, count);
 });
-test('shortcut exits even with an ad focused; rapid feedback is throttled', () => {
+test('shortcut exits even with an ad focused; reactions reach the single playback scheduler', () => {
   const {game, stats} = harness(); game.start();
   game.close(game.cards[0].id);
-  assert.equal(stats().feedback, 1);
-  assert.equal(game.key({ctrlKey: true, shiftKey: true, code: 'KeyQ'}), true);
+  assert.equal(stats().feedback, 2);
+  assert.equal(game.key({ctrlKey: true, shiftKey: true, code: 'Digit1', key: '!'}), true);
   assert.equal(game.cards.length, 0);
-  game.feedback('fake'); assert.equal(stats().feedback, 1);
+  game.feedback('fake'); assert.equal(stats().feedback, 2);
 });
 test('bounded pranks allow real success and cap live windows', () => {
   const {game} = harness(); game.start();
   const first = game.cards[0].id;
   game.close(first); assert.equal(game.closed, 0);
   game.close(first); assert.equal(game.closed, 1);
-  game.cursor = 1; game.spawn();
+  game.cursor = BUILTINS.findIndex(card => card.kind === 'nearby'); game.spawn();
   const dodge = game.cards[0].id;
   assert.equal(game.hover(dodge), true); assert.equal(game.hover(dodge), true);
   assert.equal(game.hover(dodge), false); game.close(dodge);
@@ -52,4 +52,14 @@ test('catalog only carries server-provided real identity and description, no exe
   assert.equal(cards.length, 1); assert.equal(cards[0].pluginId, '3');
   assert.equal(cards[0].body, '真实功能'); assert.equal(cards[0].url, undefined);
   assert.deepEqual(normalizeCatalog(null), []);
+});
+test('custom exit key and pause cancel timers without accumulating ads', () => {
+  const {game, timers} = harness();
+  game.shortcut = 'Ctrl+Alt+F8'; game.start();
+  game.pause(); assert.equal(timers.size, 0);
+  game.spawn(); assert.equal(game.cards.length, 1);
+  game.resume(); assert.equal(timers.size, 1);
+  assert.equal(game.key({ctrlKey: true, shiftKey: true, code: 'Digit1'}), false);
+  assert.equal(game.key({ctrlKey: true, altKey: true, code: 'F8'}), true);
+  assert.equal(game.active, false);
 });
