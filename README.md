@@ -116,4 +116,6 @@ node plugin/plugins/neko_ads/tests/connection.browser.cjs
 
 作者：**WhiteFrostune**。
 
-玩法参考 [dsh-ads](https://github.com/Nagi-ovo/dsh-ads)。许可为 Apache-2.0，见 [LICENSE](LICENSE)；宿主项目声明见 [NOTICE](NOTICE)。
+灵感来自 [dsh-ads](https://github.com/Nagi-ovo/dsh-ads)，感谢原作者的启发。
+
+许可为 Apache-2.0，见 [LICENSE](LICENSE)；宿主项目声明见 [NOTICE](NOTICE)。
