@@ -2,6 +2,10 @@
 #neko-ads-dialog,#neko-ads-launcher{pointer-events:auto}#neko-ads-launcher{z-index:1300}
 .neko-ads-toast{position:fixed;right:20px;top:20px;z-index:1300;pointer-events:none;background:#fffffff2;color:#333;border:1px solid #bbb;border-radius:8px;padding:10px 14px;font:13px/1.6 sans-serif}
 #neko-ads-layer{z-index:100060}#neko-ads-feedback{z-index:100065}#neko-ads-launcher{z-index:100070}.neko-ads-toast{z-index:100075}
+#neko-ads-launcher{cursor:grab;touch-action:none;user-select:none;max-width:calc(100vw - 16px);box-sizing:border-box}
+#neko-ads-dialog-title{cursor:grab;touch-action:none;user-select:none}
+#neko-ads-launcher[data-dragging],#neko-ads-dialog-title[data-dragging]{cursor:grabbing}
+#neko-ads-dialog{box-sizing:border-box;max-height:calc(100vh - 16px);overflow:auto}
 
 /* Both generations share the artwork format while keeping separate chrome. */
 #neko-ads-layer {

@@ -7,7 +7,29 @@
   const main = !/\/(?:chat|chat_full|subtitle)(?:\/|$)/.test(location.pathname) && !window.nekoChatWindow;
   const client = crypto.randomUUID(), storage = 'neko-ads-custom-exit-shortcut', roundStorage = 'neko-ads-current-round';
   const retired = new Set();
-  const bridgeVersion = '0.2.0';
+  const assetBuild = '0.3.0', bridgeProtocol = 1;
+  const shortVoiceVariants = new Map([
+    ['fake', ['fake', 'fakejp', 'fakeagain']],
+    ['dodge', ['dodge', 'dodgecatch', 'dodgeslow']],
+    ['closed', ['closed', 'closedfast', 'closedagain']],
+  ]);
+  const lastVoiceByGroup = new Map();
+  const shortReactionTiming = {gap: 750, maxAge: 1500};
+  const diagnosticsKey = 'neko-ads-connection-diagnostics';
+  let diagnosticEvents = [];
+  try { const saved = JSON.parse(localStorage.getItem(diagnosticsKey) || '[]'); if (Array.isArray(saved)) diagnosticEvents = saved.slice(-19); } catch (_) {}
+  let lastSuccessfulPollAt = null;
+  function diagnose(event, request) {
+    const row = {event, build:assetBuild, at:new Date().toISOString()};
+    // Only transport metadata is retained locally: never request bodies,
+    // chat, character names, audio or round identifiers.
+    if (request) for (const key of ['command','stage','kind','elapsed_ms','http_status','error_code']) {
+      if (request[key] !== undefined) row[key] = request[key];
+    }
+    diagnosticEvents.push(row); diagnosticEvents = diagnosticEvents.slice(-20);
+    try { localStorage.setItem(diagnosticsKey, JSON.stringify(diagnosticEvents)); } catch (_) {}
+  }
+  window.nekoAdsConnectionDiagnostics = {snapshot:() => ({build:assetBuild, lastSuccessfulPollAt, events:JSON.parse(JSON.stringify(diagnosticEvents))})};
   // The backend advertises the same policy. Its lease leaves room for an
   // in-flight reply after the bounded local reconnect window.
   let pollTimeout = 6000, connectionGrace = 20000, activePollInterval = 1500, idlePollInterval = 3000;
@@ -16,13 +38,18 @@
   let failureSince = null, connectionExpired = false, outageGeneration = 0;
   const stopping = new Map();
   let safetyTimer = null, safetyAbort = null;
-  let checkingPlugin = false, connectionGeneration = 0;
+  let checkingPlugin = false, connectionGeneration = 0, pluginDisabled = false;
   let available = false, controlMessage = '';
+  let lastPollFailure = null;
   let selected = localStorage.getItem(storage) || 'Ctrl+Shift+1', recording = false;
+  let shortcutGeneration = 0;
+  let assetAttempt = 0;
+  let pageFocused = typeof document.hasFocus !== 'function' || document.hasFocus();
+  let presentationFailed = false, presentationMessage = '';
   let audio = null, player = null, speechAbort = null, speechTicket = 0, bubbleTimer = null, viewPending = false;
   let reactions = null, changingVoice = false;
   let localVoiceMute = false;
-  let marketBase = 'https://market.project-neko.cn', catalog = [];
+  let marketBase = 'https://market.project-neko.cn', configuredMarket = null, catalog = [];
   const channel = typeof BroadcastChannel === 'function' ? new BroadcastChannel('neko_ads_exit') : null;
   const $ = id => document.getElementById(id);
   const character = () => String(window.lanlan_config && window.lanlan_config.lanlan_name || window.appState && window.appState.lanlan_name || '');
@@ -37,12 +64,71 @@
     node.setAttribute('role', error ? 'alert' : 'status');
     document.body.append(node); setTimeout(() => node.remove(), error ? 6500 : 3500);
   }
+  function interactiveSurface(node) {
+    // Native input-region paths in the opt-in desktop host explicitly collect
+    // known floating surfaces; arbitrary buttons are absent from that list.
+    // Use its generic surface marker on occupied controls/cards only. Never
+    // mark the full-screen layer, feedback or decorative effects.
+    // This is renderer compatibility, not a new Hosted UI/SDK capability.
+    node.className = (node.className ? node.className + ' ' : '') + 'dialog-modal';
+    return node;
+  }
+  function movable(node, handle, storageKey) {
+    let position = null, drag = null, suppressClickUntil = 0;
+    try {
+      const saved = JSON.parse(localStorage.getItem(storageKey) || 'null');
+      if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) position = {x:Math.max(0,Math.min(1,saved.x)),y:Math.max(0,Math.min(1,saved.y))};
+    } catch (_) {}
+    function limits() { return {x:Math.max(0,innerWidth-node.offsetWidth-8), y:Math.max(0,innerHeight-node.offsetHeight-8)}; }
+    function place(x, y) {
+      const max = limits(), left = Math.max(Math.min(8,max.x),Math.min(max.x,x)), top = Math.max(Math.min(8,max.y),Math.min(max.y,y));
+      node.style.position = 'fixed'; node.style.margin = '0'; node.style.right = 'auto'; node.style.bottom = 'auto';
+      node.style.left = left + 'px'; node.style.top = top + 'px';
+      return {x:max.x ? left/max.x : 0,y:max.y ? top/max.y : 0};
+    }
+    function restore(center = false) {
+      if (drag) return;
+      const max = limits();
+      if (position) place(position.x*max.x,position.y*max.y);
+      else if (center) place((innerWidth-node.offsetWidth)/2,(innerHeight-node.offsetHeight)/2);
+    }
+    function finish(e) {
+      if (!drag || e && e.pointerId !== undefined && e.pointerId !== drag.id) return;
+      const old = drag; drag = null; delete handle.dataset.dragging;
+      if (old.moved) {
+        suppressClickUntil = performance.now()+450;
+        try { localStorage.setItem(storageKey,JSON.stringify(position)); } catch (_) {}
+      }
+      try { handle.releasePointerCapture(old.id); } catch (_) {}
+    }
+    handle.onpointerdown = e => {
+      if (drag || e.button !== 0 || e.isPrimary === false) return;
+      const rect = node.getBoundingClientRect();
+      drag = {id:e.pointerId,x:e.clientX,y:e.clientY,left:rect.left,top:rect.top,moved:false};
+      try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+      e.stopPropagation();
+    };
+    handle.onpointermove = e => {
+      if (!drag || e.pointerId !== drag.id) return;
+      if (!drag.moved && Math.hypot(e.clientX-drag.x,e.clientY-drag.y)<6) return;
+      drag.moved = true; handle.dataset.dragging = 'true';
+      position = place(drag.left+e.clientX-drag.x,drag.top+e.clientY-drag.y);
+      e.preventDefault(); e.stopPropagation();
+    };
+    handle.onpointerup = finish; handle.onpointercancel = finish; handle.onlostpointercapture = finish;
+    handle.ondragstart = e => e.preventDefault();
+    return {restore,finish,consumeClick:e => {
+      if (e && e.detail !== 0 && performance.now()<suppressClickUntil) { suppressClickUntil=0; e.preventDefault(); return true; }
+      return false;
+    }};
+  }
   function controls() {
     if (!main) return;
     const active = !!rid || !!(status && status.active);
+    const mismatch = Number.isInteger(status?.bridge_protocol) && status.bridge_protocol !== bridgeProtocol;
     const phase = reconnecting ? 'reconnecting' : pending ? 'starting' : !available ? 'unavailable' : !status.ready ? 'disabled' : active ? 'playing' : 'standby';
     $('neko-ads-dialog').dataset.phase = phase;
-    $('neko-ads-start').disabled = active || !available || !status.ready || !character();
+    $('neko-ads-start').disabled = active || !available || !status.ready || !character() || mismatch;
     $('neko-ads-stop').disabled = !rid;
     $('neko-ads-start').textContent = pending ? '杂鱼♡准备好挨广告吧……' : '杂鱼♡让本喵占领桌面！';
     $('neko-ads-stop').textContent = pending ? '杂鱼♡这就反悔啦？' : '杂鱼♡这就认输啦？';
@@ -51,17 +137,18 @@
     $('neko-ads-voice').disabled = pending || changingVoice;
     updateVoiceStatus();
     $('neko-ads-launcher').textContent = '猫娘广告部 · ' + ({reconnecting:'正在重连', starting:'正在开局', unavailable:'连接中断', disabled:'未启用', playing:'游戏中', standby:'待机中'})[phase];
-    $('neko-ads-state').textContent = controlMessage || ({
-      reconnecting: '连接暂时中断，正在重试。安全词和退出快捷键仍可使用。',
+    $('neko-ads-state').textContent = controlMessage || (available && !reconnecting && presentationMessage) || ({
+      reconnecting: (lastPollFailure === 'timeout' ? '插件状态查询超时，正在重试。' : '插件状态查询失败，正在重试。') + (active ? '仍可使用安全词和退出快捷键。' : ''),
       starting: '正在开局，正在确认退出快捷键……',
-      unavailable: '插件连接不可用，请在插件管理中检查是否已启动。',
+      unavailable: character() ? '等待插件状态。可在插件管理中检查广告部是否已启动。' : '等待 N.E.K.O. 加载当前猫娘。',
       disabled: '插件未启用，请先在插件管理中启动插件。',
-      playing: '游戏进行中，当前猫娘：' + character(),
-      standby: '插件已启用 · 待机中，当前猫娘：' + character(),
+      playing: game && game.paused ? '已暂停，回到猫娘主界面后继续。' : '游戏进行中，当前猫娘：' + character(),
+      standby: mismatch ? '猫娘主界面的脚本版本与插件不兼容，请从 N.E.K.O. 托盘菜单重新加载。' : '插件已启用 · 待机中，当前猫娘：' + character(),
     })[phase];
   }
   async function rpc(command, payload = {}, signal, timeout = 6000) {
-    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), timeout);
+    let timedOut = false, stage = 'fetch', httpStatus, errorCode;
+    const started = performance.now(), controller = new AbortController(), timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeout);
     const abort = () => controller.abort();
     if (signal) { if (signal.aborted) abort(); else signal.addEventListener('abort', abort, {once: true}); }
     try {
@@ -70,18 +157,24 @@
         body: JSON.stringify({kind: 'panel', surface_id: 'main', args: {command, payload}}),
         cache: 'no-store', keepalive: command === 'stop',
       });
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.detail || '广告插件连接失败');
+      httpStatus = response.status; stage = 'decode';
+      const body = await response.json(); stage = 'result';
+      errorCode = body.detail && typeof body.detail.code === 'string' ? body.detail.code.slice(0,80) : undefined;
+      if (!response.ok) throw new Error(typeof body.detail === 'string' ? body.detail : body.detail && body.detail.message || '广告插件连接失败');
       const result = body.result || {};
       if (result.success === false || result.status === 'error' || result.error) throw new Error(result.error && (result.error.message || result.error) || '广告操作失败');
       return result.data || result.value || result;
+    } catch (error) {
+      error.adsRequest = {command,stage,kind:timedOut ? 'timeout' : signal && signal.aborted ? 'cancelled' : httpStatus >= 400 ? 'http' : stage === 'fetch' ? 'network' : 'response',elapsed_ms:Math.round(performance.now()-started),http_status:httpStatus,error_code:errorCode};
+      throw error;
     } finally { clearTimeout(timer); if (signal) signal.removeEventListener('abort', abort); }
   }
   async function pollState() {
-    const next = await rpc('poll', {client_id: client, round_id:rid, character: character(), bridge_version:bridgeVersion, busy:!!(window.appState && window.appState.isPlaying)}, undefined, pollTimeout);
+    const next = await rpc('poll', {client_id: client, round_id:rid, character: character(), bridge_version:assetBuild, bridge_protocol:bridgeProtocol, busy:!!(window.appState && window.appState.isPlaying)}, undefined, pollTimeout);
     if (!next || typeof next.active !== 'boolean' || typeof next.ready !== 'boolean' ||
         next.active && (typeof next.round_id !== 'string' || typeof next.owner !== 'string')) {
-      throw new Error('广告插件状态无效');
+      const error = new Error('广告插件状态无效');
+      error.adsRequest = {command:'poll',stage:'validation',kind:'response'}; throw error;
     }
     return next;
   }
@@ -102,10 +195,12 @@
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 2000);
     try {
       const response = await fetch(base.replace(/\/plugin\/neko_ads$/, '') + '/plugin/status?plugin_id=neko_ads', {signal: controller.signal, cache:'no-store'});
-      if (!response.ok) return false;
+      if (!response.ok) return null;
       const data = await response.json();
-      return ['stopped', 'disabled', 'error', 'crashed', 'frozen'].includes(data.status && data.status.status);
-    } catch (_) { return false; }
+      const phase = data.status && data.status.status;
+      if (['stopped', 'disabled', 'error', 'crashed', 'frozen'].includes(phase)) return true;
+      return phase === 'running' ? false : null;
+    } catch (_) { return null; }
     finally { clearTimeout(timer); }
   }
   function checkPluginStopped(version, id) {
@@ -116,15 +211,19 @@
     // host stall. Only a confirmed stop bypasses the reconnect deadline.
     void pluginStopped().then(stopped => {
       if (!stopped || version !== revision || id !== rid || generation !== connectionGeneration) return;
+      // A confirmed lifecycle stop ends the outage. Keep it quiet until a
+      // later status probe confirms the plugin has been started again.
+      pluginDisabled = true; connected();
       status = {...status, ready:false, active:false}; available = true; wasReady = false;
       if (rid) stop();
+      for (const job of stopping.values()) job.confirm();
       controlMessage = '广告部下班啦，杂鱼♡'; $('neko-ads-launcher').hidden = true; controls();
     }).finally(() => { setTimeout(() => { checkingPlugin = false; }, 5000); });
   }
   function cancelAudio() {
     const sequence = speechTicket++;
     if (speechAbort) { speechAbort.abort(); speechAbort = null; }
-    if (rid) rpc('cancel_speech', {round_id: rid, sequence, preserve:false}).catch(() => {});
+    if (rid && !pluginDisabled) rpc('cancel_speech', {round_id: rid, sequence, preserve:false}).catch(() => {});
     if (player) player.stop();
   }
   function stopAudio() { if (reactions) reactions.clear(); else cancelAudio(); }
@@ -141,6 +240,7 @@
     } catch (_) {}
   }
   function requestStop(id, epoch) {
+    if (pluginDisabled) return;
     const key = id || epoch;
     if (!key || stopping.has(key)) return;
     const version = revision, generation = connectionGeneration;
@@ -199,6 +299,8 @@
   }
   function finish() {
     const old = rid; if (old) retired.add(old);
+    cancelLoading(); shortcutGeneration++; recording = false;
+    presentationFailed = false; presentationMessage = '';
     stopAudio(); rid = null; pending = false; viewPending = false; revision++;
     cancelSafetyWatch(); publishRound(null); connectionGeneration++;
     clearTimeout(bubbleTimer);
@@ -213,8 +315,10 @@
   function connected() {
     clearTimeout(connectionTimer); connectionTimer = null; reconnecting = false;
     failureSince = null; connectionExpired = false; outageGeneration++;
+    lastPollFailure = null;
   }
   function connectionIssue(failedQuery = true) {
+    if (pluginDisabled) return;
     if (failedQuery && failureSince === null) {
       failureSince = performance.now();
       const generation = ++outageGeneration, deadline = failureSince + connectionGrace;
@@ -223,6 +327,7 @@
         const remaining = deadline - performance.now();
         if (remaining > 0) { connectionTimer = setTimeout(expire, remaining); return; }
         connectionTimer = null; connectionExpired = true; reconnecting = false; available = false;
+        diagnose('connection-expired');
         const playing = !!rid;
         if (playing) stop();
         controlMessage = playing ? '广告插件持续失联，本局已结束。请重新确认开局。' : '广告插件持续失联，请检查插件运行状态。'; controls();
@@ -256,16 +361,33 @@
   }
   function anchor() {
     const bubble = $('neko-ads-feedback');
-    const api = window.avatarReactionBubble;
-    const at = api && api.getActiveAvatarBubbleAnchor && api.getActiveAvatarBubbleAnchor();
+    const at = avatarAnchor();
     const rect = at && at.bounds;
     bubble.style.left = Math.max(8, Math.min(innerWidth - bubble.offsetWidth - 8, rect ? (rect.left + rect.right - bubble.offsetWidth) / 2 : innerWidth * .6)) + 'px';
     bubble.style.top = Math.max(8, Math.min(innerHeight - bubble.offsetHeight - 8, rect ? rect.top - bubble.offsetHeight - 12 : innerHeight * .35)) + 'px';
   }
+  function avatarAnchor() {
+    try {
+      const api = window.avatarReactionBubble;
+      const at = api && api.getActiveAvatarBubbleAnchor && api.getActiveAvatarBubbleAnchor();
+      const r = at && at.bounds;
+      return r && [r.left, r.right, r.top, r.bottom].every(Number.isFinite) && r.right > r.left && r.bottom > r.top ? at : null;
+    } catch (_) { return null; }
+  }
   async function feedback(_line, speak, event) {
-    const line = status && status.feedback && status.feedback[event];
+    const preparation = status?.voice_preparation;
+    const ready = preparation?.events;
+    const group = event;
+    const variants = shortVoiceVariants.get(event);
+    if (variants && ready) {
+      const after = variants.indexOf(lastVoiceByGroup.get(group)) + 1;
+      const order = [...variants.slice(after), ...variants.slice(0, after)];
+      event = order.find(variant => ready[variant] === 'ready') || event;
+    }
+    const line = status && status.feedback && status.feedback[event] || _line && {text:_line[0], emotion:'surprised'};
     if (!line || !rid || !game.active || game.paused) return;
     const bubble = $('neko-ads-feedback');
+    bubble.dataset.reaction = event;
     bubble.textContent = character() + '：' + line.text; bubble.hidden = false; anchor();
     clearTimeout(bubbleTimer); bubbleTimer = setTimeout(() => { bubble.hidden = true; }, 5500);
     if (reconnecting) return;
@@ -273,20 +395,34 @@
     if (chatting) { stopAudio(); return; }
     if (typeof window.applyEmotion === 'function') window.applyEmotion(line.emotion);
     if (!$('neko-ads-voice').checked || !audio) return;
+    if (!preparation?.clips?.[event] && (preparation?.state === 'unavailable' || ready && ready[event] !== 'ready')) {
+      reactions?.discardPending();
+      return;
+    }
     reactions = reactions || new NekoAds.ReactionQueue({
       play: playSpeech, cancel: cancelAudio,
       valid: () => !!rid && game && game.active && !game.paused && !reconnecting && $('neko-ads-voice').checked && !(window.appState && window.appState.isPlaying),
     });
-    reactions.request(event);
+    reactions.request(event, variants || event === 'start' ? shortReactionTiming : undefined);
+  }
+  function markVoiceStarted(event) {
+    for (const [group, variants] of shortVoiceVariants) {
+      if (variants.includes(event)) {
+        lastVoiceByGroup.set(group, event);
+        break;
+      }
+    }
   }
   async function playSpeech(event, valid) {
+    if (!valid()) return;
     const ticket = ++speechTicket, id = rid;
     const abort = new AbortController(); speechAbort = abort;
     const parts = []; let size = 0;
     try {
-      const clips = status && status.voice_preparation && status.voice_preparation.clips;
-      if (clips && !clips[event]) return;
-      const job = clips ? {audio_url:clips[event]} : await rpc('speech', {round_id: id, event, sequence: ticket}, abort.signal);
+      const preparation = status && status.voice_preparation;
+      const url = preparation?.clips?.[event];
+      if (!url && (preparation?.state === 'unavailable' || preparation?.events && preparation.events[event] !== 'ready')) return;
+      const job = url ? {audio_url:url} : await rpc('speech', {round_id: id, event, sequence: ticket}, abort.signal);
       if (!valid()) return;
       if (job.audio_url && /^\/ui\/voice-cache\/[a-f0-9-]+_[a-z]+\.(?:wav|ogg)$/.test(job.audio_url)) {
         const response = await fetch(base + job.audio_url, {signal:abort.signal,cache:'no-store'});
@@ -294,6 +430,7 @@
         const buffer = await audio.decodeAudioData(await response.arrayBuffer());
         if (!valid() || abort.signal.aborted || rid !== id || ticket !== speechTicket) return;
         player = player || new NekoAds.SpeechPlayer(audio); player.enqueue(buffer);
+        markVoiceStarted(event);
         await player.idle(); return;
       }
       if (!job.job_id) return;
@@ -304,6 +441,7 @@
         player = player || new NekoAds.SpeechPlayer(audio);
         if (result.pcm) {
           player.pcm(Uint8Array.from(atob(result.pcm), c => c.charCodeAt(0)), result.sample_rate || 48000);
+          markVoiceStarted(event);
         }
         if (result.audio_part) {
           const part = Uint8Array.from(atob(result.audio_part), c => c.charCodeAt(0));
@@ -317,6 +455,7 @@
           const buffer = await audio.decodeAudioData(bytes.buffer);
           if (!valid() || abort.signal.aborted || rid !== id || ticket !== speechTicket) return;
           player.enqueue(buffer);
+          markVoiceStarted(event);
         }
         if (result.ready) { if (player) await player.idle(); return; }
         await new Promise(resolve => setTimeout(resolve, 80));
@@ -331,7 +470,8 @@
     const count = preparation ? preparation.ready + '/' + preparation.total : '0/9';
     node.textContent = !enabled ? '语音已关闭' : !preparation || preparation.state === 'waiting' ? '等待当前猫娘，语音会静默准备。' :
       preparation.state === 'ready' ? '当前猫娘语音已就绪 · ' + count : preparation.state === 'paused' ? '语音准备已暂停 · ' + count :
-      preparation.state === 'partial' || preparation.state === 'unavailable' ? '部分语音暂未就绪 · ' + count + '，可重试。' : '正在静默准备语音 · ' + count;
+      preparation.state === 'unavailable' || preparation.state === 'partial' && preparation.ready === 0 ? '当前猫娘语音暂不可用，游戏会显示文字反馈。' :
+      preparation.state === 'partial' ? '部分语音暂未就绪 · ' + count + '，可重试。' : '正在静默准备语音 · ' + count;
     retry.disabled = !enabled || !available || !preparation || !['paused','partial','unavailable'].includes(preparation.state);
   }
   function render() {
@@ -343,10 +483,11 @@
     game.cards.forEach(card => {
       // Asset paths belong to the plugin server, not the host desktop page.
       const artworkURL = card.image ? new URL(card.image, base + '/ui/').href : '';
+      const market = marketBase;
       const open = (e, link) => {
         const id = rid;
         void NekoAds.openAdLink(e, {
-          url: link.href, shell: window.electronShell,
+          url: link.href, market, shell: window.electronShell,
           electron: /Electron/i.test(navigator.userAgent || ''),
           onOpening: () => { viewPending = true; pause(); },
           onError: message => {
@@ -357,7 +498,7 @@
         });
       };
       const modern = window.NekoAdTemplates.create(document, artworkURL ? {...card, image: artworkURL} : card, {
-        assets: base + '/ui', links: {project: 'https://project-neko.online/', market: marketBase + '/#/plugins'},
+        assets: base + '/ui', links: {project: 'https://project-neko.online/', market: market + '/#/plugins'},
         close: target => game.close(card.id, target), open, change: render,
       });
       let box, bar;
@@ -370,7 +511,7 @@
         close.onpointerenter = e => { if (e.pointerType !== 'touch') game.hover(card.id); };
         close.onclick = e => { e.stopPropagation(); game.close(card.id); }; bar.append(close);
         const link = el('a', undefined, 'neko-ad-promotion');
-        link.href = card.pluginId ? marketBase + '/#/plugin/' + encodeURIComponent(card.pluginId) : card.kind === 'market' ? marketBase + '/#/plugins' : card.kind === 'nearby' ? 'https://github.com/Project-N-E-K-O/N.E.K.O#readme' : card.kind === 'scan' ? 'https://project-neko.online/zh-CN/' : 'https://project-neko.online/';
+        link.href = card.pluginId ? market + '/#/plugin/' + encodeURIComponent(card.pluginId) : card.kind === 'market' ? market + '/#/plugins' : card.kind === 'nearby' ? 'https://github.com/Project-N-E-K-O/N.E.K.O#readme' : card.kind === 'scan' ? 'https://project-neko.online/zh-CN/' : 'https://project-neko.online/';
         link.target = '_blank'; link.rel = 'noopener noreferrer';
         const media = el('div', artworkURL ? undefined : '广告图片占位', 'neko-ad-image-placeholder');
         if (artworkURL) {
@@ -386,6 +527,7 @@
         const later = el('button', '稍后提醒'); later.type = 'button'; later.onclick = () => game.postpone(card.id);
         box.append(bar, link, later);
       }
+      interactiveSurface(box);
       layer.append(box);
       box.style.left = Math.round(card.x * Math.max(0, innerWidth - box.offsetWidth - 20)) + 'px';
       box.style.top = Math.round(card.y * Math.max(0, innerHeight - box.offsetHeight - 120)) + 'px';
@@ -430,55 +572,95 @@
   }
   function loadEngine() {
     if (window.NekoAds && window.NekoAdTemplates) return Promise.resolve();
+    if (loading) return loading.promise;
+    const job = {id:++assetAttempt, cancelled:false, cancelScript:null}; loading = job;
     const load = name => new Promise((resolve, reject) => {
-      const script = document.createElement('script'); script.crossOrigin = 'anonymous'; script.src = base + '/ui/' + name + '?v=' + bridgeVersion;
-      script.onload = resolve; script.onerror = () => reject(new Error('广告资源加载失败')); document.head.append(script);
+      if (job.cancelled) { reject(new Error('广告资源加载已取消')); return; }
+      const script = document.createElement('script'); let done = false;
+      const finish = error => {
+        if (done) return; done = true; clearTimeout(timer);
+        script.onload = script.onerror = null; job.cancelScript = null;
+        if (error) { script.remove(); reject(error); } else resolve();
+      };
+      const timer = setTimeout(() => finish(new Error('广告资源加载超时，请重试开局')), 8000);
+      job.cancelScript = () => finish(new Error('广告资源加载已取消'));
+      // A removed script can retain its in-flight network request. Give retries
+      // a distinct URL so the browser cannot coalesce them with a stalled load.
+      script.crossOrigin = 'anonymous'; script.src = base + '/ui/' + name + '?v=' + assetBuild + '&attempt=' + job.id;
+      script.onload = () => {
+        const ready = name === 'engine.js' ? window.NekoAds && typeof window.NekoAds.Game === 'function' :
+          window.NekoAdTemplates && typeof window.NekoAdTemplates.create === 'function';
+        finish(ready ? null : new Error('广告资源无效，请重试开局'));
+      };
+      script.onerror = () => finish(new Error('广告资源加载失败，请重试开局'));
+      document.head.append(script);
     });
-    if (!loading) loading = (async () => {
+    job.promise = (async () => {
       if (!window.NekoAds) await load('engine.js');
       if (!window.NekoAdTemplates) await load('ad-templates.js');
-    })().catch(error => { loading = null; throw error; });
-    return loading;
+      if (job.cancelled) throw new Error('广告资源加载已取消');
+    })().finally(() => { if (loading === job) loading = null; });
+    return job.promise;
+  }
+  function cancelLoading() {
+    const job = loading; loading = null;
+    if (job) { job.cancelled = true; if (job.cancelScript) job.cancelScript(); }
   }
   function unlockAudio() { try { audio = audio || new (window.AudioContext || window.webkitAudioContext)(); audio.resume().catch(() => {}); } catch (_) {} }
-  async function adopt(next) {
+  function adopt(next, syncShortcut = true) {
     status = next;
     if (!next.active || next.owner !== client || retired.has(next.round_id)) { if (rid && !pending) stop(); return; }
+    // A panel can end and replace a round between two polls. Retire this
+    // renderer's old timers/audio first; its stop request remains bound to the
+    // old ID. Adopt the replacement only from the following fresh heartbeat.
+    if (game && game.active && rid !== next.round_id) { stop(); return; }
     if (game && game.active && rid === next.round_id) {
-      selected = next.shortcut; game.shortcut = selected; updateNotice(); return;
+      if (syncShortcut) { selected = next.shortcut; game.shortcut = selected; updateNotice(); }
+      return;
     }
     const version = revision;
     if (!window.NekoAds || !window.NekoAdTemplates) {
-      await loadEngine();
-      // Validate against the next scheduled heartbeat after assets arrive.
-      // An immediate duplicate query adds two host IPC trips and can leave
-      // adoption stuck retrying despite a healthy preceding heartbeat.
+      // A panel may accept a round before this renderer has loaded its engine.
+      // Adopt its identity for lease renewal and emergency exit immediately;
+      // asset I/O must never be awaited by the heartbeat loop.
+      const id = next.round_id, changed = rid !== id;
+      rid = id; publishRound(id); if (changed) watchSafety();
+      if (!loading) void loadEngine().catch(error => {
+        if (version !== revision || rid !== id) return;
+        stop(); controlMessage = error.message; controls();
+      });
       return;
     }
     if (version !== revision || retired.has(next.round_id)) return;
+    if (configuredMarket) marketBase = NekoAds.marketAddress(configuredMarket) || marketBase;
     status = next;
     rid = next.round_id; selected = next.shortcut; pending = false;
     $('neko-ads-voice').checked = !localVoiceMute && next.voice_enabled !== false;
     unlockAudio();
-    game = new NekoAds.Game({shortcut: selected, onChange: render, onFeedback: feedback, onStop: finish});
+    game = new NekoAds.Game({shortcut: selected, now: () => performance.now(), onChange: renderSafely,
+      onFeedback: feedbackSafely, onStop: finish});
     game.catalog = NekoAds.normalizeCatalog({items: catalog});
-    $('neko-ads-dialog').close(); controlMessage = ''; updateNotice(); game.start(); controls();
+    $('neko-ads-dialog').close(); controlMessage = ''; updateNotice(); game.start({paused:!canPresent()}); controls();
     publishRound(rid); watchSafety();
   }
   async function start() {
-    if (pending || rid || status && status.active || !available || !status.ready) return;
+    if (pending || rid || status && status.active || !available || !status.ready ||
+        Number.isInteger(status.bridge_protocol) && status.bridge_protocol !== bridgeProtocol) return;
     pending = true; controlMessage = ''; const version = ++revision; rid = crypto.randomUUID(); const id = rid; publishRound(id); watchSafety(); unlockAudio(); controls();
     let next;
     try {
+      await loadEngine();
+      if (version !== revision || rid !== id) return;
+      if (!available || !status.ready) throw new Error('广告部暂不可用，请连接恢复后重新开局');
       next = await rpc('start', {round_id:id, epoch:status.epoch, stop_epoch:status.stop_epoch, owner:client, confirmed:true, shortcut:selected, voice_enabled:$('neko-ads-voice').checked});
     } catch (error) {
-      if (version === revision) { finish(); controlMessage = error.message; controls(); }
+      if (version === revision) { diagnose('start-failed',error.adsRequest || {command:'start',stage:'prepare',kind:'local'}); finish(); controlMessage = error.message; controls(); }
       return;
     }
     if (version !== revision) { requestStop(id); return; }
     pending = false;
-    try { await adopt(next); }
-    catch (_) { if (version === revision && rid === id) connectionIssue(); }
+    try { adopt(next); }
+    catch (_) { if (version === revision && rid === id) presentationIssue(); }
   }
   function updateNotice() {
     $('neko-ads-key').value = selected;
@@ -490,20 +672,42 @@
     const mods = [e.ctrlKey && 'Ctrl', e.altKey && 'Alt', e.shiftKey && 'Shift'].filter(Boolean);
     const key = /^Digit\d$/.test(e.code) ? e.code.slice(5) : /^Key[A-Z]$/.test(e.code) ? e.code.slice(3) : /^F(?:[1-9]|10|11)$/.test(e.code) ? e.code : '';
     if (!mods.length || !key || e.metaKey) { $('neko-ads-state').textContent = '请使用修饰键与字母、数字或 F1–F11 组合'; return; }
-    const next = [...mods, key].join('+'); recording = true; controls();
+    const next = [...mods, key].join('+'), version = revision, id = rid, ticket = ++shortcutGeneration;
+    recording = true; controls();
     try {
-      if (rid) await rpc('shortcut', {round_id: rid, shortcut: next});
-      selected = next; if (game) game.shortcut = next; localStorage.setItem(storage, next); updateNotice();
-    } catch (error) { controlMessage = error.message; }
-    finally { recording = false; controls(); }
+      const result = id ? await rpc('shortcut', {round_id:id, shortcut:next}) : null;
+      if (version !== revision || id !== rid || ticket !== shortcutGeneration) return;
+      if (id && (!result.active || result.round_id !== id || typeof result.shortcut !== 'string')) throw new Error('退出键变更未确认，请检查当前局状态');
+      selected = result ? result.shortcut : next;
+      if (game) game.shortcut = selected;
+      localStorage.setItem(storage, selected); updateNotice();
+    } catch (error) { if (version === revision && id === rid && ticket === shortcutGeneration) controlMessage = error.message; }
+    finally {
+      if (ticket === shortcutGeneration) { recording = false; shortcutGeneration++; controls(); }
+    }
   }
   function exitKey(e) {
     const parts = selected.split('+'), key = parts.pop();
     return !e.metaKey && !!e.ctrlKey === parts.includes('Ctrl') && !!e.altKey === parts.includes('Alt') && !!e.shiftKey === parts.includes('Shift') &&
       (e.code === (/^\d$/.test(key) ? 'Digit' + key : /^F\d+$/.test(key) ? key : 'Key' + key));
   }
+  function canPresent() { return pageFocused && !document.hidden; }
   function pause() { if (game && game.active) { game.pause(); stopAudio(); $('neko-ads-feedback').hidden = true; } }
-  function resume() { if (game && game.active && !document.hidden) { game.resume(); if (viewPending) { viewPending = false; game.feedback('view'); } } }
+  function resume() { if (game && game.active && canPresent() && !presentationFailed) { game.resume(); if (viewPending) { viewPending = false; game.feedback('view'); } } }
+  function presentationIssue() {
+    presentationFailed = true;
+    presentationMessage = '广告界面暂不可用，正在重试；安全词和退出快捷键仍可使用。';
+    pause(); $('neko-ads-layer').replaceChildren(); controls();
+  }
+  function renderSafely() {
+    try { render(); } catch (_) { presentationIssue(); }
+  }
+  function feedbackSafely(...args) {
+    const version = revision, id = rid;
+    void feedback(...args).catch(() => {
+      if (version === revision && id === rid && game && game.active) presentationIssue();
+    });
+  }
   function init() {
     document.addEventListener('input', e => { if (e.target.type !== 'password') safe(e.target.value || e.target.textContent); }, true);
     document.addEventListener('compositionend', e => safe(e.data), true);
@@ -521,9 +725,9 @@
     // Chat windows only forward explicit safety input. They do not own the
     // round, and a cached round ID is not needed for the global safety stop.
     if (!main) return;
-    const css = document.createElement('link'); css.rel = 'stylesheet'; css.crossOrigin = 'anonymous'; css.href = base + '/ui/desktop.css?v=' + bridgeVersion; document.head.append(css);
-    const launcher = el('button', '猫娘广告部 · 待机中', 'neko-ads-launcher'); launcher.id = 'neko-ads-launcher'; launcher.hidden = true;
-    const dialog = el('dialog'); dialog.id = 'neko-ads-dialog';
+    const css = document.createElement('link'); css.rel = 'stylesheet'; css.crossOrigin = 'anonymous'; css.href = base + '/ui/desktop.css?v=' + assetBuild; document.head.append(css);
+    const launcher = interactiveSurface(el('button', '猫娘广告部 · 待机中', 'neko-ads-launcher')); launcher.id = 'neko-ads-launcher'; launcher.hidden = true;
+    const dialog = interactiveSurface(el('dialog')); dialog.id = 'neko-ads-dialog';
     const notice = el('p'); notice.id = 'neko-ads-notice';
     const label = el('label', '退出快捷键（点击后按组合键）'), key = el('input'); key.id = 'neko-ads-key'; key.readOnly = true; key.onkeydown = recordKey; label.append(key);
     const voiceLabel = el('label', '当前猫娘语音反馈 '), voice = el('input'); voice.type = 'checkbox'; voice.checked = true; voice.id = 'neko-ads-voice'; voiceLabel.append(voice);
@@ -543,28 +747,46 @@
     begin.setAttribute('aria-label', '开始广告游戏：杂鱼♡让本喵占领桌面！');
     const end = el('button', '杂鱼♡这就认输啦？'); end.id = 'neko-ads-stop'; end.onclick = stop;
     const back = el('button', '杂鱼♡先放你回去（返回主页面）'); back.id = 'neko-ads-back'; back.onclick = () => dialog.close();
-    dialog.append(el('h2','猫娘广告部：杂鱼桌面占领计划'), notice, label, voiceLabel, voiceState, voiceRetry, state, begin, end, back);
+    const heading = el('h2','猫娘广告部：杂鱼桌面占领计划'); heading.id = 'neko-ads-dialog-title';
+    heading.title = '按住标题可拖动';
+    dialog.setAttribute('aria-labelledby',heading.id);
+    dialog.append(heading, notice, label, voiceLabel, voiceState, voiceRetry, state, begin, end, back);
     const layer = el('div'); layer.id = 'neko-ads-layer';
     const bubble = el('div'); bubble.id = 'neko-ads-feedback'; bubble.hidden = true; bubble.setAttribute('role', 'status');
     document.body.append(launcher, dialog, layer, bubble); updateNotice(); controls();
-    launcher.onclick = () => { controls(); dialog.showModal(); };
+    launcher.title = '点击打开广告部；按住拖动入口';
+    const launcherMove = movable(launcher,launcher,'neko-ads-launcher-position');
+    const dialogMove = movable(dialog,heading,'neko-ads-dialog-position');
+    launcherMove.restore();
+    launcher.onclick = e => { if (launcherMove.consumeClick(e)) return; controls(); dialog.showModal(); dialogMove.restore(true); };
     document.addEventListener('pointerdown', () => { if (rid) unlockAudio(); }, true);
     document.addEventListener('keydown', e => {
       if (!rid || e.target === key) return;
       if (game && game.active ? game.key(e) : exitKey(e) && (stop(), true)) { e.preventDefault(); e.stopImmediatePropagation(); }
     }, true);
-    window.addEventListener('blur', pause); window.addEventListener('focus', resume);
+    window.addEventListener('blur', () => { launcherMove.finish(); dialogMove.finish(); pageFocused = false; pause(); });
+    window.addEventListener('focus', () => { pageFocused = true; resume(); });
     document.addEventListener('visibilitychange', () => document.hidden ? pause() : resume());
     window.addEventListener('offline', () => connectionIssue(false)); window.addEventListener('pagehide', () => { if (rid) stop(); });
-    window.addEventListener('resize', render);
+    window.addEventListener('resize', () => { launcherMove.restore(); if (dialog.open) dialogMove.restore(true); renderSafely(); });
     window.addEventListener('neko-assistant-speech-start', () => { stopAudio(); bubble.hidden = true; });
     async function poll() {
-      const version = revision, id = rid;
+      const version = revision, id = rid, keyVersion = shortcutGeneration;
       let delay = rid ? activePollInterval : idlePollInterval;
       try {
         const name = character();
         if (!name) { delay = 500; return; }
-        const next = await pollState();
+        if (pluginDisabled) {
+          const stopped = await pluginStopped();
+          if (version !== revision || id !== rid || stopped !== false) return;
+          pluginDisabled = false;
+        }
+        let next;
+        try { next = await pollState(); }
+        catch (error) {
+          if (version === revision && id === rid) { lastPollFailure = error.adsRequest?.kind; diagnose('poll-failed',error.adsRequest); connectionIssue(); checkPluginStopped(version, id); }
+          return;
+        }
         if (version !== revision || id !== rid) return;
         connectionGeneration++;
         for (const job of stopping.values()) {
@@ -572,35 +794,42 @@
         }
         if (!next.active && controlMessage.startsWith('本地已退出，后台停止尚未确认')) controlMessage = '后台已确认结束，插件继续待机。';
         const recovered = reconnecting || connectionExpired;
+        lastSuccessfulPollAt = new Date().toISOString();
+        if (recovered) diagnose('connection-restored');
         if (recovered) controlMessage = '';
         connected();
         connectionPolicy(next);
         delay = idlePollInterval;
-        if (next.voice_enabled === false || status && status.voice_preparation && next.voice_preparation && status.voice_preparation.token !== next.voice_preparation.token) stopAudio();
-        if (!changingVoice) voice.checked = !localVoiceMute && next.voice_enabled !== false;
-        if (next.ready && status && !status.ready) controlMessage = '';
-        status = next; available = true; launcher.hidden = !next.ready && !rid;
-        try { if (next.stop_epoch) localStorage.setItem('neko-ads-stop-epoch', next.stop_epoch); } catch (_) {}
-        if (next.ready && !wasReady) {
-          toast('猫娘广告部已启用，正在待机。点击左上角入口开始游戏。');
-        }
-        wasReady = !!next.ready;
-        if (!pending) await adopt(next);
-        if (version !== revision) return;
-        if (rid && !pending) {
-          anchor(); document.querySelectorAll('.neko-ad-placeholder').forEach(avoidInput);
-          if (recovered) controlMessage = '连接已恢复，广告部继续营业。';
-        }
-        controls();
-      } catch (_) {
-        if (version !== revision || id !== rid) return;
-        connectionIssue();
-        checkPluginStopped(version, id);
+        try {
+          if (next.voice_enabled === false || status && status.voice_preparation && next.voice_preparation && status.voice_preparation.token !== next.voice_preparation.token) stopAudio();
+          if (!changingVoice) voice.checked = !localVoiceMute && next.voice_enabled !== false;
+          if (next.ready && status && !status.ready) controlMessage = '';
+          status = next; available = true; launcher.hidden = !next.ready && !rid;
+          try { if (next.stop_epoch) localStorage.setItem('neko-ads-stop-epoch', next.stop_epoch); } catch (_) {}
+          if (next.ready && !wasReady) {
+            toast('猫娘广告部已启用，正在待机。点击左上角入口开始游戏。');
+          }
+          wasReady = !!next.ready;
+          if (!pending) adopt(next, !recording && keyVersion === shortcutGeneration);
+          if (version !== revision) return;
+          if (rid && !pending) {
+            if (presentationFailed) render();
+            anchor(); document.querySelectorAll('.neko-ad-placeholder').forEach(avoidInput);
+            if (presentationFailed) { presentationFailed = false; presentationMessage = ''; resume(); }
+            if (recovered) controlMessage = '连接已恢复，广告部继续营业。';
+          }
+          controls();
+          launcherMove.restore();
+        } catch (_) { if (version === revision) presentationIssue(); }
       } finally { setTimeout(poll, rid ? activePollInterval : delay); }
     }
     poll();
     Promise.all([fetch(base.replace(/\/plugin\/neko_ads$/, '') + '/market/catalog/api/v1/plugins?page=1&page_size=12').then(r => r.json()), fetch(base.replace(/\/plugin\/neko_ads$/, '') + '/market/status').then(r => r.json())])
-      .then(([items, market]) => { const url = new URL(market.market_web_url || market.market_url); if (['http:','https:'].includes(url.protocol) && !url.username && !url.password) { marketBase = url.origin + url.pathname.replace(/\/$/, ''); catalog = items.items || []; } }).catch(() => {});
+      .then(([items, market]) => {
+        configuredMarket = market.market_web_url || market.market_url;
+        if (window.NekoAds) marketBase = NekoAds.marketAddress(configuredMarket) || marketBase;
+        catalog = items.items || [];
+      }).catch(() => {});
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, {once:true}); else init();
 })();

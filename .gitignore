@@ -22,3 +22,6 @@ playwright-report/
 coverage/
 .DS_Store
 Thumbs.db
+
+# Local design discussions (not for release or upload)
+/docs/design-notes.md

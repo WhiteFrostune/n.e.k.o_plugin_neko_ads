@@ -54,7 +54,7 @@ const server = createServer(async (req, res) => {
       if (command === 'speech_result') {
         let data = {ready: true};
         if (state.active && voiceJob && payload.job_id === voiceJob.id && !voiceJob.cancelled) {
-          data = voiceMode === 'voice-parts' ? (() => { const bytes = Buffer.from(cachedAudio,'base64'), offset = voiceJob.polls++ * 48000; return {ready:offset+48000>=bytes.length,audio_part:bytes.subarray(offset,offset+48000).toString('base64')}; })() :
+          data = ['voice-parts','voice-memory'].includes(voiceMode) ? (() => { const bytes = Buffer.from(cachedAudio,'base64'), offset = voiceJob.polls++ * 48000; return {ready:offset+48000>=bytes.length,audio_part:bytes.subarray(offset,offset+48000).toString('base64')}; })() :
             ['voice-cache','voice-queued','voice-reconnect'].includes(voiceMode) ? {ready: true, audio: cachedAudio, mime: 'audio/wav'} :
             voiceJob.polls++ < 2 ? {ready: false, pcm, sample_rate: 48000} : {ready: voiceJob.released};
         }
@@ -76,10 +76,22 @@ const server = createServer(async (req, res) => {
     async function setup(mode) {
       reset(); voiceJob = null; voiceMode = mode; releaseResource = null; failedPoll = false; cancelRequests = [];
       if (mode.startsWith('voice-resource')) state.voice_preparation.clips = Object.fromEntries(['start','fake','view'].map(event=>[event,'/ui/voice-cache/11111111-1111-4111-8111-111111111111_'+event+'.wav']));
+      if (mode === 'voice-resource-short') {
+        const events = ['start', 'fake', 'fakejp'];
+        state.voice_preparation = {state:'preparing',ready:events.length,total:15,token:'test-voice',
+          clips:Object.fromEntries(events.map(event=>[event,'/ui/voice-cache/11111111-1111-4111-8111-111111111111_'+event+'.wav'])),
+          events:{start:'ready',fake:'ready',fakejp:'ready',fakeagain:'pending',closed:'pending'}};
+        state.feedback.fake = {text:'杂鱼杂鱼！',emotion:'happy'};
+        state.feedback.fakejp = {text:'ざこ、ざこ！',emotion:'happy'};
+        state.feedback.fakeagain = {text:'又上当啦！',emotion:'happy'};
+      }
+      if (mode === 'voice-memory') Object.assign(state.voice_preparation, {clips:{}, events:{start:'ready'}});
+      if (mode === 'voice-unavailable') Object.assign(state.voice_preparation, {state:'unavailable',ready:0,clips:{},events:{start:'pending'}});
       const context = await browser.newContext({viewport: {width: 1100, height: 800}, ...(mode === 'missing' ? {userAgent: 'N.E.K.O Electron/40.0.0'} : {})});
       await context.route('https://**/*', route => route.fulfill({contentType: 'text/html', body: '<h1>可关闭的测试标签页</h1>'}));
       const page = await context.newPage(); page.setDefaultTimeout(8000);
       await page.addInitScript(mode => {
+        if (mode === 'voice-resource-short') Math.random = () => 0.5;
         window.__openedAds = [];
         window.__adsSounds = {started: 0, stopped: 0};
         const start = AudioBufferSourceNode.prototype.start, stop = AudioBufferSourceNode.prototype.stop;
@@ -156,9 +168,9 @@ const server = createServer(async (req, res) => {
       await expect(page.locator('.neko-ad-placeholder')).toHaveCount(1);
       await exit(page);await context.close();
     }
-    for (const mode of ['voice-stream', 'voice-cache', 'voice-resource', 'voice-parts', 'voice-replaced']) {
+    for (const mode of ['voice-stream', 'voice-cache', 'voice-resource', 'voice-parts', 'voice-memory', 'voice-replaced']) {
       const {context, page} = await setup(mode);
-      const count = ['voice-cache','voice-resource','voice-parts'].includes(mode) ? 1 : 2;
+      const count = ['voice-cache','voice-resource','voice-parts','voice-memory'].includes(mode) ? 1 : 2;
       await expect.poll(() => page.evaluate(() => window.__adsSounds.started)).toBe(count);
       if (mode === 'voice-resource') assert.equal(voiceJob,null,'prepared playback must not issue a speech action');
       else assert.equal(voiceJob.released, false, 'the first sound must not wait for generation to finish');
@@ -175,6 +187,51 @@ const server = createServer(async (req, res) => {
       if (voiceJob) voiceJob.released = true;
       await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 200)));
       assert.equal(await page.evaluate(() => window.__adsSounds.started), count, 'late voice packets cannot resume after exit');
+      await context.close();
+    }
+    {
+      const {context,page} = await setup('voice-resource-short');
+      const bubble = page.locator('#neko-ads-feedback');
+      await expect.poll(() => page.evaluate(() => window.__adsSounds.started)).toBe(1);
+      await page.locator('.neko-ad-placeholder header button').first().click();
+      await expect(bubble).toContainText('杂鱼杂鱼！');
+      await expect.poll(() => page.evaluate(() => window.__adsSounds.started)).toBe(2);
+      await page.locator('.neko-ad-placeholder header button').first().click();
+      await expect(bubble).toContainText('算你赢！');
+      await expect.poll(() => page.evaluate(() => window.__adsSounds.started)).toBe(2);
+      await expect(page.locator('.neko-ad-webgame')).toBeVisible({timeout:22000});
+      const card = page.locator('.neko-ad-webgame');
+      // The fixed random value makes the strip button the true X in this fixture.
+      await card.locator('[data-ad-close="frame"]').click();
+      await expect(bubble).toContainText('ざこ、ざこ！');
+      await expect.poll(() => page.evaluate(() => window.__adsSounds.started)).toBe(3);
+      await card.locator('[data-ad-close="frame"]').click();
+      await expect(bubble).toContainText('杂鱼杂鱼！');
+      await expect.poll(() => page.evaluate(() => window.__adsSounds.started)).toBe(4);
+      state.voice_preparation.events.fakeagain = 'ready';
+      state.voice_preparation.clips.fakeagain = '/ui/voice-cache/11111111-1111-4111-8111-111111111111_fakeagain.wav';
+      state.voice_preparation.ready++;
+      await page.locator('#neko-ads-launcher').click();
+      await expect(page.locator('#neko-ads-voice-status')).toContainText('4/15');
+      await page.locator('#neko-ads-back').click();
+      await card.locator('[data-ad-close="frame"]').click();
+      await expect(bubble).toContainText('ざこ、ざこ！');
+      await expect.poll(() => page.evaluate(() => window.__adsSounds.started)).toBe(5);
+      await card.locator('[data-ad-close="frame"]').click();
+      await expect(bubble).toContainText('又上当啦！');
+      await expect.poll(() => page.evaluate(() => window.__adsSounds.started)).toBe(6);
+      await exit(page);
+      await context.close();
+    }
+    {
+      const {context,page} = await setup('voice-unavailable');
+      await expect(page.locator('#neko-ads-feedback')).toContainText('测试开业');
+      await page.locator('#neko-ads-launcher').click();
+      await expect(page.locator('#neko-ads-voice-status')).toContainText('游戏会显示文字反馈');
+      assert.equal(voiceJob,null);
+      assert.equal(await page.evaluate(() => window.__adsSounds.started),0);
+      await page.locator('#neko-ads-back').click();
+      await exit(page);
       await context.close();
     }
     {

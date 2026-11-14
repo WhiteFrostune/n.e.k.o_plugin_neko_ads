@@ -10,16 +10,23 @@ from .connection import CONNECTION_POLICY, LEASE_SECONDS
 from .hotkey import DEFAULT_SHORTCUT, GlobalExitHotkey, parse_shortcut
 
 LINES = {
-    'start': ('广告部，开业！主人今天也要好好看广告哦♡', 'happy'),
-    'dodge': ('こっち、こっち～连一个叉都追不上？', 'happy'),
-    'fake': ('ざぁこ♡ 你关闭的是广告的广告哦。', 'happy'),
+    'start': ('广告部，开业！', 'happy'),
+    'fake': ('杂鱼杂鱼！', 'happy'),
+    'dodge': ('这边啦！', 'happy'),
+    'closed': ('算你赢！', 'angry'),
+    'fakejp': ('ざこ、ざこ！', 'happy'),
+    'dodgecatch': ('抓不到喵！', 'happy'),
+    'closedfast': ('手挺快嘛！', 'surprised'),
+    'fakeagain': ('又上当啦！', 'happy'),
+    'dodgeslow': ('慢吞吞～', 'happy'),
+    'closedagain': ('哼，再来！', 'angry'),
+    'view': ('嘴上说要关掉，结果还是点进去了嘛～', 'happy'),
     'scan': ('体检完毕！主人需要补充一只猫娘♡', 'happy'),
     'split': ('关掉一张，赠送一张。是不是很贴心？', 'happy'),
     'later': ('稍后？本广告部的稍后，就是现在哦～', 'happy'),
-    'closed': ('哼，刚刚算你赢。可别得意忘形了！', 'angry'),
     'streak': ('等、等等……你怎么越来越熟练了！不许笑！', 'surprised'),
-    'view': ('嘴上说要关掉，结果还是点进去了嘛～', 'happy'),
 }
+BRIDGE_PROTOCOL = 1
 
 
 def valid_id(value):
@@ -85,9 +92,10 @@ class DesktopController:
             'character': self.character, 'shortcut': self.shortcut, 'safe_word': '广告下班',
             'voice_enabled': self.voice_enabled,
             'connection_policy': dict(CONNECTION_POLICY),
+            'bridge_protocol': BRIDGE_PROTOCOL,
             'voice_preparation': self.bank.snapshot() if self.bank else None,
             'desktop_ready': bridge is not None,
-            'desktop': {key: bridge[key] for key in ('client_id', 'character', 'bridge_version')} if bridge else None,
+            'desktop': {key: bridge[key] for key in ('client_id', 'character', 'bridge_version', 'bridge_protocol')} if bridge else None,
             'feedback': {key: {'text': value[0], 'emotion': value[1]} for key, value in LINES.items()},
         }
 
@@ -120,14 +128,15 @@ class DesktopController:
             self.watchdog = None
         self.bridges.clear()
 
-    async def poll(self, client_id, character, busy=False, bridge_version=None, round_id=None):
+    async def poll(self, client_id, character, busy=False, bridge_version=None, round_id=None, bridge_protocol=None):
         if not valid_id(client_id) or not isinstance(character, str) or not character.strip() or len(character) > 120:
             raise ValueError('无效的主界面标识')
         # The SDK runs startup on a temporary event loop. The renderer's first
         # command attaches the watcher to the persistent command loop instead.
         self.run()
         version = bridge_version if isinstance(bridge_version, str) and len(bridge_version) <= 40 else None
-        self.bridges[client_id] = {'client_id': client_id, 'character': character, 'seen': self.clock(), 'busy': busy is True, 'bridge_version': version}
+        self.bridges[client_id] = {'client_id': client_id, 'character': character, 'seen': self.clock(),
+                                   'busy': busy is True, 'bridge_version': version, 'bridge_protocol': bridge_protocol}
         if self.bank and (not self.owner or self.owner == client_id):
             self.bank.set_busy(busy is True)
             if self.bank.character != character:
@@ -150,6 +159,8 @@ class DesktopController:
             bridge = self.bridges.get(owner)
             if not bridge:
                 raise ValueError('主界面桥接尚未连接，请先重新加载猫娘主界面')
+            if bridge['bridge_protocol'] not in (None, BRIDGE_PROTOCOL):
+                raise ValueError('猫娘主界面的脚本版本与插件不兼容，请重新加载猫娘主界面')
             if status['active']:
                 raise ValueError('广告游戏已经开启')
             version = self.generation
@@ -332,17 +343,34 @@ class DesktopController:
     async def command(self, command, payload):
         if not isinstance(payload, dict):
             raise ValueError('无效请求')
+        rid = payload.get('round_id')
+        if command in ('start', 'shortcut', 'speech', 'cancel_speech') or (command in ('poll', 'stop') and rid is not None):
+            if not valid_id(rid):
+                raise ValueError('无效的游戏标识')
+        if command in ('speech', 'voice_clip'):
+            event = payload.get('event')
+            if not isinstance(event, str) or event not in LINES:
+                raise ValueError('无效的语音事件')
+        if command in ('speech', 'cancel_speech'):
+            sequence = payload.get('sequence')
+            if sequence is not None and (type(sequence) is not int or not 0 <= sequence <= 2**53 - 1):
+                raise ValueError('无效的语音操作序号')
         if command == 'poll':
-            return await self.poll(payload.get('client_id'), payload.get('character'), payload.get('busy', False), payload.get('bridge_version'), payload.get('round_id'))
+            busy, version, protocol = payload.get('busy', False), payload.get('bridge_version'), payload.get('bridge_protocol')
+            if type(busy) is not bool or version is not None and (not isinstance(version, str) or len(version) > 40):
+                raise ValueError('无效的主界面状态')
+            if protocol is not None and (type(protocol) is not int or not 1 <= protocol <= 2**31 - 1):
+                raise ValueError('无效的主界面协议版本')
+            return await self.poll(payload.get('client_id'), payload.get('character'), busy, version, rid, protocol)
         if command == 'start':
             if not isinstance(payload.get('epoch'), str) or payload.get('stop_epoch') != self.stop_epoch:
                 raise ValueError('请刷新广告部界面后重新确认开局')
-            return await self.start(payload.get('round_id'), payload.get('owner'), payload.get('confirmed'), payload.get('shortcut', DEFAULT_SHORTCUT), payload.get('voice_enabled', True), payload['epoch'], payload['stop_epoch'])
+            owner, voice = payload.get('owner'), payload.get('voice_enabled', True)
+            if not valid_id(owner) or type(voice) is not bool:
+                raise ValueError('无效的开局设置')
+            return await self.start(rid, owner, payload.get('confirmed'), payload.get('shortcut', DEFAULT_SHORTCUT), voice, payload['epoch'], payload['stop_epoch'])
         if command == 'stop':
-            rid = payload.get('round_id')
-            if rid is not None and not valid_id(rid):
-                raise ValueError('无效的游戏标识')
-            if rid is None and not isinstance(payload.get('stop_epoch'), str):
+            if rid is None and not valid_id(payload.get('stop_epoch')):
                 raise ValueError('停止请求需要游戏标识或有效的停止代次')
             return await self.stop(rid, epoch=payload.get('stop_epoch') if rid is None else None)
         if command == 'shortcut':
@@ -368,27 +396,36 @@ class DesktopController:
             return self.snapshot()
         if command == 'voice_clip':
             import base64
+            token, offset = payload.get('token'), payload.get('offset', 0)
+            if not valid_id(token):
+                raise ValueError('无效的音频标识')
+            if type(offset) is not int or not 0 <= offset <= 4_000_000:
+                raise ValueError('无效的音频位置')
             if self.bank and self.bank.character:
-                clip = self.bank.clip(payload.get('event'))
-                if clip and payload.get('token') == self.bank.token:
-                    resource = self.bank.resource(payload.get('event'))
+                clip = self.bank.clip(event)
+                if clip and token == self.bank.token:
+                    if offset > len(clip[0]):
+                        raise ValueError('无效的音频位置')
+                    resource = self.bank.resource(event)
                     if resource:
                         return {'audio_url':'/ui/voice-cache/' + resource,'mime':clip[1],'voice_token':self.bank.token}
-                    offset = payload.get('offset', 0)
-                    if type(offset) is not int or not 0 <= offset <= len(clip[0]):
-                        raise ValueError('无效的音频位置')
                     end = min(offset + 48_000, len(clip[0]))
                     return {'audio':base64.b64encode(clip[0][offset:end]).decode('ascii'), 'mime':clip[1], 'voice_token':self.bank.token,
                             'next_offset':end, 'total':len(clip[0]), 'ready':end == len(clip[0])}
             return {}
         if command == 'speech_result':
-            return self.speech_result(payload.get('job_id'))
+            job_id = payload.get('job_id')
+            if not isinstance(job_id, str) or not 1 <= len(job_id) <= 120:
+                raise ValueError('无效的语音任务标识')
+            return self.speech_result(job_id)
         if command == 'cancel_speech':
-            if payload.get('round_id') == self.round_id:
-                sequence = payload.get('sequence')
-                if sequence is None or type(sequence) is int and sequence >= self.speech_sequence:
+            preserve = payload.get('preserve', False)
+            if type(preserve) is not bool:
+                raise ValueError('无效的语音取消设置')
+            if rid == self.round_id:
+                if sequence is None or sequence >= self.speech_sequence:
                     if sequence is not None:
                         self.speech_sequence = sequence
-                    self.cancel_speech(preserve=payload.get('preserve') is True)
+                    self.cancel_speech(preserve=preserve)
             return {}
         raise ValueError('不支持的广告操作')

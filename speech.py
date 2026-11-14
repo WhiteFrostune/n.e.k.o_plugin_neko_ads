@@ -5,11 +5,14 @@ import asyncio
 import hashlib
 import io
 import json
+import logging
 import queue
 import threading
 import time
 import wave
 from collections import OrderedDict
+
+_LOG = logging.getLogger(__name__)
 
 
 class VoiceCache:
@@ -117,6 +120,7 @@ async def synthesize_feedback(manager, text, valid, *, emit=None, cache=None):
         return cached
     requests, responses = queue.Queue(), queue.Queue(maxsize=256)
     thread = threading.Thread(target=worker, args=(requests, responses, key, voice), daemon=True)
+    worker_started = time.monotonic()
     thread.start()
     chunks = []
     size = 0
@@ -124,6 +128,7 @@ async def synthesize_feedback(manager, text, valid, *, emit=None, cache=None):
     completed = False
     failure = 'timeout'
     stream_pcm = None
+    ready_at = first_audio_at = None
     deadline = time.monotonic() + 12
     try:
         while valid() and time.monotonic() < deadline:
@@ -139,6 +144,7 @@ async def synthesize_feedback(manager, text, valid, *, emit=None, cache=None):
                         break
                     if not started:
                         started = True
+                        ready_at = time.monotonic()
                         requests.put(("neko_ads", text))
                         requests.put((None, None))
                 elif data[0] == "__audio_done__":
@@ -151,6 +157,8 @@ async def synthesize_feedback(manager, text, valid, *, emit=None, cache=None):
                     data = data[2]
             if isinstance(data, (bytes, bytearray)):
                 chunk = bytes(data)
+                if chunk and first_audio_at is None:
+                    first_audio_at = time.monotonic()
                 if stream_pcm is None and chunk:
                     stream_pcm = not chunk.startswith((b'RIFF', b'OggS'))
                 chunks.append(chunk)
@@ -161,6 +169,14 @@ async def synthesize_feedback(manager, text, valid, *, emit=None, cache=None):
                     failure = 'audio_limit'
                     break
     finally:
+        elapsed = time.monotonic() - worker_started
+        _LOG.info(
+            "Ad voice synthesis: result=%s worker_ready_ms=%s first_audio_ms=%s elapsed_ms=%d",
+            'cancelled' if not valid() else 'completed' if completed else failure,
+            None if ready_at is None else round((ready_at - worker_started) * 1000),
+            None if first_audio_at is None else round((first_audio_at - worker_started) * 1000),
+            round(elapsed * 1000),
+        )
         requests.put(("__interrupt__", None))
         requests.put(("__shutdown__", None))
         # Drain a bounded output queue even if a provider completes after cancellation.

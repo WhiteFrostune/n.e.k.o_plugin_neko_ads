@@ -2,7 +2,7 @@
 id = "neko_ads"
 name = "猫娘广告部：杂鱼桌面占领计划"
 description = "用户主动开局的复古广告整蛊小游戏。支持安全词退出。"
-version = "0.2.0"
+version = "0.3.0"
 entry = "plugin.plugins.neko_ads:NekoAdsPlugin"
 passive = true
 

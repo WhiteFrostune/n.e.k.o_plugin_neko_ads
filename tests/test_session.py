@@ -4,6 +4,7 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
+
 from plugin.plugins.neko_ads import NekoAdsPlugin
 from plugin.plugins.neko_ads.session import AdSession
 

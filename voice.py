@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
+import time
 import uuid
 from collections import deque
 from functools import wraps
 from pathlib import Path
+
+_LOG = logging.getLogger(__name__)
 
 
 def locked(method):
@@ -37,22 +41,28 @@ class VoiceBank:
         self.resources = {}
 
     def clean_files(self):
-        if not self.cache_dir or not self.cache_dir.exists():
+        if not self.cache_dir:
             return
-        for file in self.cache_dir.iterdir():
+        try:
+            files = list(self.cache_dir.iterdir())
+        except OSError:
+            return
+        for file in files:
             token, _, event = file.stem.partition('_')
             try:
                 uuid.UUID(token)
-            except ValueError:
+                if event in self.lines and file.suffix in ('.wav','.ogg') and file.resolve().parent == self.cache_dir:
+                    file.unlink(missing_ok=True)
+            except (ValueError, OSError):
                 continue
-            if event in self.lines and file.suffix in ('.wav','.ogg') and file.resolve().parent == self.cache_dir:
-                file.unlink(missing_ok=True)
 
     def publish(self, token, event, clip, valid):
+        started = time.monotonic()
         self.cache_dir.mkdir(parents=True,exist_ok=True)
         filename = token + '_' + event + ('.ogg' if clip[1] == 'audio/ogg' else '.wav')
         file = self.cache_dir / filename
         file.write_bytes(clip[0])
+        _LOG.info("Ad voice cache write: event=%s write_ms=%d", event, round((time.monotonic() - started) * 1000))
         if not valid():
             file.unlink(missing_ok=True)
             return None
@@ -150,6 +160,7 @@ class VoiceBank:
                     character = self.character
                 self.record(event, 'preparing')
                 try:
+                    started = time.monotonic()
                     clip = await self.synthesize(character, text, valid, emit=None)
                     with self.lock:
                         if not valid():
@@ -158,16 +169,27 @@ class VoiceBank:
                             raise ValueError('empty_audio')
                         if sum(len(item[0]) for item in self.clips.values()) + len(clip[0]) > self.max_bytes:
                             raise ValueError('audio_limit')
-                    filename = await asyncio.to_thread(self.publish,token,event,clip,valid) if self.cache_dir and valid() else None
-                    with self.lock:
-                        if not valid():
-                            if filename:
-                                (self.cache_dir / filename).unlink(missing_ok=True)
-                            return
+                        # Playback can stream this clip even when static publishing fails.
                         self.clips[event] = clip
-                        if filename:
-                            self.resources[event] = filename
                         self.record(event, 'ready')
+                    _LOG.info("Ad voice ready: event=%s prepare_ms=%d", event, round((time.monotonic() - started) * 1000))
+                    if not self.cache_dir or not valid():
+                        continue
+                    try:
+                        filename = await asyncio.to_thread(self.publish, token, event, clip, valid)
+                    except OSError:
+                        continue
+                    if not filename:
+                        continue
+                    with self.lock:
+                        if valid():
+                            self.resources[event] = filename
+                            continue
+                    try:
+                        await asyncio.to_thread((self.cache_dir / filename).unlink, missing_ok=True)
+                    except OSError:
+                        pass
+                    return
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -194,7 +216,7 @@ class VoiceBank:
 
     @locked
     def snapshot(self):
-        state = 'disabled' if not self.enabled else 'waiting' if not self.character else 'paused' if self.suspended or self.busy else 'unavailable' if not self.fingerprint else 'preparing' if self.task else 'ready' if len(self.clips) == len(self.lines) else 'partial' if self.failures else 'preparing'
+        state = 'disabled' if not self.enabled else 'waiting' if not self.character else 'unavailable' if not self.fingerprint else 'paused' if self.suspended or self.busy else 'preparing' if self.task else 'ready' if len(self.clips) == len(self.lines) else 'partial' if self.failures else 'preparing'
         return {'state': state, 'character': self.character, 'token': self.token,
                 'ready': len(self.clips), 'total': len(self.lines), 'failed': list(self.failures), 'errors':dict(self.failures),
                 'clips': {event:'/ui/voice-cache/' + filename for event,filename in self.resources.items()} if self.enabled and self.fingerprint else {},

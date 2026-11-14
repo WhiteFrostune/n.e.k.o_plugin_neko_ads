@@ -13,6 +13,7 @@ function panelLink({shell, parent = {}, electron = false} = {}) {
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../static/panel-links.js'), 'utf8'), {
     window: {NekoAds, electronShell: shell, parent}, navigator: {userAgent: electron ? 'Electron' : 'Browser'},
     document: {getElementById: id => id === 'open-website' ? link : status},
+    URL, location: {href:'http://127.0.0.1:48916/plugin/neko_ads/ui/'},
     fetch: forbidden, setTimeout: forbidden, setInterval: forbidden,
   });
   const event = {type: 'click', button: 0, prevented: false, preventDefault() { this.prevented = true; }};

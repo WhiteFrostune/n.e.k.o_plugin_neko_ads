@@ -1,9 +1,11 @@
 import asyncio
+import base64
 import sys
 import threading
 import uuid
 
 import pytest
+
 from plugin.plugins.neko_ads.desktop import LINES, DesktopController
 from plugin.plugins.neko_ads.session import AdSession
 from plugin.plugins.neko_ads.voice import VoiceBank
@@ -20,7 +22,7 @@ async def complete(bank):
 
 
 @pytest.mark.asyncio
-async def test_nine_lines_prepare_serially_and_never_emit_playback():
+async def test_all_lines_prepare_serially_and_never_emit_playback():
     running = maximum = 0
     calls = []
 
@@ -37,11 +39,14 @@ async def test_nine_lines_prepare_serially_and_never_emit_playback():
     bank = VoiceBank(LINES, synth, identity)
     await bank.refresh("猫娘甲")
     await complete(bank)
-    assert bank.snapshot()["state"] == "ready" and bank.snapshot()["ready"] == 9
-    assert maximum == 1 and len(calls) == 9
+    assert bank.snapshot()["state"] == "ready" and bank.snapshot()["ready"] == len(LINES)
+    assert maximum == 1 and len(calls) == len(LINES)
+    assert list(LINES)[:4] == ["start", "fake", "dodge", "closed"]
+    assert [text for _, text in calls] == [text for text, _ in LINES.values()]
+    assert {"hammer", "recovered"}.isdisjoint(LINES)
     await bank.refresh("猫娘甲")
     await complete(bank)
-    assert len(calls) == 9
+    assert len(calls) == len(LINES)
 
 
 def test_preparation_survives_the_sdk_temporary_startup_loop():
@@ -63,10 +68,10 @@ def test_preparation_survives_the_sdk_temporary_startup_loop():
         try:
             await desktop.poll(str(uuid.uuid4()), "甲")
             for _ in range(100):
-                if desktop.bank.snapshot()["ready"] == 9:
+                if desktop.bank.snapshot()["ready"] == len(LINES):
                     break
                 await asyncio.sleep(0.01)
-            assert desktop.bank.snapshot()["ready"] == 9
+            assert desktop.bank.snapshot()["ready"] == len(LINES)
             assert not desktop.snapshot()["active"] and desktop.hotkey is None
         finally:
             await desktop.close()
@@ -120,7 +125,7 @@ async def test_prepared_media_resources_are_current_only_and_playback_returns_a_
         await desktop.poll(owner, "甲")
         await desktop.bank.refresh("甲")
         await complete(desktop.bank)
-        assert len(list(tmp_path.iterdir())) == 9
+        assert len(list(tmp_path.iterdir())) == len(LINES)
         await desktop.start(rid, owner, True, "Ctrl+Shift+1")
         result = await desktop.command("speech", {"round_id": rid, "event": "start", "sequence": 1})
         filename = result["audio_url"].rsplit("/", 1)[1]
@@ -133,8 +138,74 @@ async def test_prepared_media_resources_are_current_only_and_playback_returns_a_
         await desktop.poll(owner, "乙")
         await desktop.bank.refresh("乙")
         await complete(desktop.bank)
-        assert not (tmp_path / filename).exists() and len(list(tmp_path.iterdir())) == 9
+        assert not (tmp_path / filename).exists() and len(list(tmp_path.iterdir())) == len(LINES)
         assert await desktop.command("voice_clip", {"event": "start", "token": old}) == {}
+    finally:
+        await desktop.close()
+
+
+@pytest.mark.asyncio
+async def test_read_only_cache_keeps_audio_and_can_stream_it(tmp_path, monkeypatch):
+    class Key:
+        def register(self, shortcut, callback):
+            return shortcut
+
+        def close(self):
+            pass
+
+    async def synth(character, text, valid, *, emit):
+        return character.encode(), "audio/ogg"
+
+    session = AdSession()
+    session.ready()
+    desktop = DesktopController(
+        session, hotkey_factory=Key, speech_factory=synth, identity_factory=identity, voice_cache_dir=tmp_path
+    )
+    owner, rid = str(uuid.uuid4()), str(uuid.uuid4())
+    try:
+        await desktop.poll(owner, "甲")
+        await desktop.bank.refresh("甲")
+        await complete(desktop.bank)
+        assert desktop.bank.snapshot()["clips"], "first character must have cached files to clean"
+        file_type = type(tmp_path)
+        original_unlink = file_type.unlink
+
+        def deny_cleanup(path, *args, **kwargs):
+            if path.parent == tmp_path:
+                raise PermissionError("read-only cache")
+            return original_unlink(path, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(file_type, "unlink", deny_cleanup)
+            await desktop.poll(owner, "乙")
+            await desktop.bank.refresh("乙")
+
+        def deny_publish(*args, **kwargs):
+            raise PermissionError("read-only cache")
+
+        monkeypatch.setattr(desktop.bank, "publish", deny_publish)
+        await complete(desktop.bank)
+        prepared = desktop.bank.snapshot()
+        assert prepared["state"] == "ready" and not prepared["failed"] and not prepared["clips"]
+        await desktop.start(rid, owner, True, "Ctrl+Shift+1")
+        job = await desktop.command("speech", {"round_id": rid, "event": "start", "sequence": 1})
+        assert base64.b64decode(desktop.speech_result(job["job_id"])["audio_part"]) == "乙".encode()
+        job = await desktop.command("speech", {"round_id": rid, "event": "fake", "sequence": 2})
+        await desktop.stop(rid)
+        assert desktop.speech_result(job["job_id"]) == {"ready": True}
+
+        async def unavailable(character):
+            raise AttributeError("incompatible host voice API")
+
+        monkeypatch.setattr(desktop.bank, "identity", unavailable)
+        await desktop.bank.refresh("乙")
+        rid = str(uuid.uuid4())
+        started = await desktop.start(rid, owner, True, "Ctrl+Shift+1")
+        assert started["active"] and started["feedback"]["start"]["text"]
+        assert started["voice_preparation"]["state"] == "unavailable"
+        result = await desktop.command("speech", {"round_id": rid, "event": "start", "sequence": 1})
+        assert result == {"skipped": "not_ready"}
+        assert not (await desktop.stop(rid))["active"]
     finally:
         await desktop.close()
 
@@ -178,12 +249,12 @@ async def test_failed_line_is_visible_and_retry_only_prepares_missing_clips():
     bank = VoiceBank(LINES, synth, identity)
     await bank.refresh("甲")
     await complete(bank)
-    assert bank.snapshot()["ready"] == 8 and bank.snapshot()["failed"] == ["fake"]
+    assert bank.snapshot()["ready"] == len(LINES) - 1 and bank.snapshot()["failed"] == ["fake"]
     assert "private-provider" not in str(bank.snapshot())
     failed[0] = False
     bank.retry()
     await complete(bank)
-    assert bank.snapshot()["ready"] == 9 and len(calls) == 10
+    assert bank.snapshot()["ready"] == len(LINES) and len(calls) == len(LINES) + 1
 
 
 @pytest.mark.asyncio
@@ -285,18 +356,18 @@ async def test_prepared_audio_is_reused_in_game_and_stop_cancels_all_work():
     await desktop.poll(owner, "甲")
     await desktop.bank.refresh("甲")
     await complete(desktop.bank)
-    checks = len(identity_calls)
-    assert not desktop.snapshot()["active"] and desktop.hotkey is None and not desktop.jobs
-    clip = await desktop.command("voice_clip", {"event": "start", "token": desktop.bank.token})
-    assert clip["audio"] and len(calls) == 9
     await desktop.start(rid, owner, True, "Ctrl+Shift+1")
+    checks = len(identity_calls)
+    assert desktop.snapshot()["active"] and desktop.hotkey is not None and not desktop.jobs
+    clip = await desktop.command("voice_clip", {"event": "start", "token": desktop.bank.token})
+    assert clip["audio"] and len(calls) == len(LINES)
     first = await desktop.command("speech", {"round_id": rid, "event": "start", "sequence": 1})
     assert desktop.speech_result(first["job_id"])["audio_part"]
     second = await desktop.command("speech", {"round_id": rid, "event": "fake", "sequence": 2})
     assert desktop.speech_result(second["job_id"])["audio_part"], (
         "no second backend cooldown may reject the serialized player"
     )
-    assert len(calls) == 9
+    assert len(calls) == len(LINES)
     assert len(identity_calls) == checks, "playback must not repeat provider/configuration lookups"
     await desktop.stop(rid)
     assert desktop.bank.snapshot()["state"] == "paused" and not desktop.jobs

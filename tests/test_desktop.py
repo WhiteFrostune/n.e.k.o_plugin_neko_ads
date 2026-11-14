@@ -6,6 +6,7 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
+
 from plugin.plugins.neko_ads.desktop import DesktopController
 from plugin.plugins.neko_ads.session import AdSession
 
@@ -29,6 +30,35 @@ def setup(**kwargs):
     session = AdSession()
     session.ready()
     return DesktopController(session, hotkey_factory=Key, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_malformed_desktop_payloads_fail_without_disturbing_an_active_round():
+    desktop = setup()
+    owner, rid = str(uuid.uuid4()), str(uuid.uuid4())
+    try:
+        poll = {'client_id': owner, 'character': '当前猫娘'}
+        state = await desktop.command('poll', {**poll, 'bridge_protocol': 1})
+        assert state['desktop']['bridge_protocol'] == state['bridge_protocol']
+        await desktop.start(rid, owner, True, 'Ctrl+Shift+1')
+        for name, payload in [
+            ('poll', {**poll, 'busy': 'false'}),
+            ('poll', {**poll, 'bridge_protocol': True}),
+            ('speech', {'round_id': rid, 'event': []}),
+            ('voice_clip', {'event': 'start', 'token': rid, 'offset': True}),
+            ('speech_result', {'job_id': []}),
+            ('cancel_speech', {'round_id': rid, 'sequence': False}),
+            ('stop', {'stop_epoch': []}),
+        ]:
+            with pytest.raises(ValueError, match='无效|需要'):
+                await desktop.command(name, payload)
+            assert desktop.snapshot()['round_id'] == rid
+        assert not (await desktop.command('stop', {'round_id': rid}))['active']
+        await desktop.command('poll', {**poll, 'bridge_protocol': 2})
+        with pytest.raises(ValueError, match='脚本版本.*不兼容'):
+            await desktop.start(str(uuid.uuid4()), owner, True, 'Ctrl+Shift+1')
+    finally:
+        await desktop.close()
 
 
 @pytest.mark.asyncio

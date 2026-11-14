@@ -64,3 +64,22 @@ test('invalid protocols and embedded credentials cannot reach the system opener'
     assert.equal(h.errors.length, 1);
   }
 });
+
+test('ads only open project destinations or catalog routes at the configured market', async () => {
+  for (const [target, market, allowed] of [
+    ['https://project-neko.online/zh-CN/', undefined, true],
+    ['https://github.com/Project-N-E-K-O/N.E.K.O#readme', undefined, true],
+    ['https://store.steampowered.com/app/4099310/__NEKO/', undefined, true],
+    ['https://github.com/someone/else', undefined, false],
+    ['https://project-neko.online.example.com/', undefined, false],
+    ['https://market.project-neko.cn/login#/plugins', undefined, false],
+    ['http://localhost:5173/dev/#/plugin/test', 'http://localhost:5173/dev', true],
+    ['https://custom.example.com/catalog/#/plugins', 'https://custom.example.com/catalog', true],
+    ['https://alt.example.com/catalog/#/plugins', 'https://custom.example.com/catalog', false],
+    ['http://custom.example.com/#/plugins', 'http://custom.example.com/', false],
+  ]) {
+    const h = harness({url:target, market});
+    assert.equal(await openAdLink(h.event, h.args), allowed, target);
+    assert.equal(h.calls.length, Number(allowed), target);
+  }
+});

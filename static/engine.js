@@ -13,13 +13,13 @@
     market: 'assets/posters/plugin-market.png',
   };
   const FEEDBACK = {
-    start: ['广告部，开——业！主人今天也要好好看广告哦♡', '広告の時間だよ。ちゃんと見てね♡', 'smug'],
-    dodge: ['こっち、こっち～连一个叉都追不上？', 'こっち、こっち。遅いね、ざぁこ♡', 'smug'],
-    fake: ['ざぁこ♡ 你关闭的是广告的广告哦。', 'ざぁこ。それは広告の広告だよ♡', 'smug'],
+    start: ['广告部，开业！', '広告部、開店！', 'smug'],
+    dodge: ['这边啦！', 'こっちだよ！', 'smug'],
+    fake: ['杂鱼杂鱼！', 'ざこ、ざこ！', 'smug'],
     split: ['关掉一张，赠送一张！猫娘广告部就是这么贴心～', 'もう一枚、プレゼントだよ♡', 'smug'],
     scan: ['体检完毕！主人缺的不是优化，是猫娘♡', '足りないのは、猫ちゃんだよ♡', 'smug'],
     later: ['稍后？本广告部的稍后，就是现在哦～', 'あとで？今すぐだよ♡', 'smug'],
-    closed: ['哼，刚刚算你赢。可别得意忘形了！', '今回は負けてあげる。調子に乗らないでね。', 'pout'],
+    closed: ['算你赢！', '勝ちにしてあげる！', 'pout'],
     streak: ['等、等等……你怎么越来越熟练了！不许笑！', 'ちょっと。上手くなりすぎ。笑わないで！', 'flustered'],
     view: ['嘴上嫌烦，点得倒是很诚实嘛，主人♡', 'ふふ、気になるんだね、ざぁこ♡', 'smug'],
   };
@@ -64,12 +64,33 @@
         pluginId: String(p.id).slice(0, 100), pluginName: p.name.trim().slice(0, 40),
       }));
   }
-  async function openAdLink(event, {url, shell, electron = false, onOpening = () => {}, onError = () => {}}) {
+  const DEFAULT_MARKET = 'https://market.project-neko.cn';
+  function marketAddress(value) {
+    try {
+      const url = new URL(value);
+      const dev = ['localhost','127.0.0.1','[::1]'].includes(url.hostname);
+      if (url.username || url.password || !(url.protocol === 'https:' || dev && url.protocol === 'http:')) return null;
+      return url.origin + url.pathname.replace(/\/$/, '');
+    } catch (_) { return null; }
+  }
+  function adDestination(target, market, localPage) {
+    if (localPage) return target.href === localPage;
+    if (target.protocol === 'https:') {
+      if (target.origin === 'https://project-neko.online') return true;
+      if (target.origin === 'https://github.com' && /^\/Project-N-E-K-O\/N\.E\.K\.O\/?$/i.test(target.pathname)) return true;
+      if (target.origin === 'https://store.steampowered.com' && /^\/app\/4099310(?:\/|$)/.test(target.pathname)) return true;
+    }
+    const base = marketAddress(market);
+    return !!base && marketAddress(target.href) === base && !target.search &&
+      /^#\/(?:plugins|plugin\/[a-z0-9_.~%-]+)$/i.test(target.hash);
+  }
+  async function openAdLink(event, {url, market = DEFAULT_MARKET, localPage, shell, electron = false, onOpening = () => {}, onError = () => {}}) {
     if (event.type === 'auxclick' && event.button !== 1) return false;
     let target;
     try {
       target = new URL(url);
-      if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password) throw new Error();
+      if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password ||
+          !adDestination(target, market, localPage)) throw new Error();
     } catch (_) {
       event.preventDefault(); onError('广告链接无效，已取消跳转。'); return false;
     }
@@ -131,14 +152,21 @@
       Object.assign(this, {play, cancel, valid, now, schedule, unschedule, gap, maxAge});
       this.pending = null; this.running = false; this.timer = null; this.generation = 0; this.last = -Infinity;
     }
-    request(event) {
+    request(event, {gap = this.gap, maxAge = this.maxAge} = {}) {
       if (!this.valid()) return;
-      this.pending = {event, at:this.now()}; this.pump();
+      this.discardPending();
+      this.pending = {event, at:this.now(), gap, maxAge}; this.pump();
+    }
+    discardPending() {
+      this.pending = null;
+      if (this.timer !== null) this.unschedule(this.timer);
+      this.timer = null;
     }
     async pump() {
       if (this.running || this.timer !== null || !this.pending || !this.valid()) return;
-      if (this.now() - this.pending.at > this.maxAge) { this.pending = null; return; }
-      const wait = this.last + this.gap - this.now();
+      const age = this.now() - this.pending.at;
+      const wait = Math.max(0, this.last + this.pending.gap - this.now());
+      if (age + wait > this.pending.maxAge) { this.pending = null; return; }
       if (wait > 0) { this.timer = this.schedule(() => { this.timer = null; this.pump(); }, wait); return; }
       const item = this.pending, generation = this.generation;
       this.pending = null; this.running = true; this.last = this.now();
@@ -147,9 +175,8 @@
       finally { if (generation === this.generation) { this.running = false; this.pump(); } }
     }
     clear() {
-      this.generation++; this.pending = null; this.running = false; this.last = -Infinity;
-      if (this.timer !== null) this.unschedule(this.timer);
-      this.timer = null; this.cancel();
+      this.generation++; this.running = false; this.last = -Infinity;
+      this.discardPending(); this.cancel();
     }
   }
   class Game {
@@ -176,22 +203,26 @@
         if (this.active && !this.paused && generation === this.generation) fn();
       }, ms);
       this.timers.add(id);
+      return id;
     }
-    start() {
+    start({paused = false} = {}) {
       if (this.active) return;
       this.generation++;
       this.active = true;
-      this.paused = false;
+      this.paused = paused;
+      this.deferredStart = paused;
       this.cards = [];
       this.cursor = this.closed = this.attempts = 0;
       this.lastFeedback = -Infinity;
       this.successStreak = 0; this.lastStreak = -Infinity;
+      if (paused) return;
       this.spawn();
       this.feedback('start');
       this.loop();
     }
     stop(reason = 'exit') {
       this.active = false;
+      this.deferredStart = false;
       this.generation++;
       for (const id of this.timers) this.cancel(id);
       this.timers.clear();
@@ -200,6 +231,7 @@
       this.onChange();
     }
     loop() {
+      if (!this.active || this.paused) return;
       this.later(() => { this.spawn(); this.loop(); }, 6500 + this.random() * 3500);
     }
     pause() {
@@ -211,6 +243,7 @@
     resume() {
       if (!this.active || !this.paused) return;
       this.paused = false;
+      if (this.deferredStart) { this.deferredStart = false; this.spawn(); this.feedback('start'); }
       this.loop();
     }
     spawn() {
@@ -289,5 +322,5 @@
       return false;
     }
   }
-  return {Game, BUILTINS, FEEDBACK, SAFE_WORD, normalizeCatalog, openAdLink, SpeechPlayer, ReactionQueue};
+  return {Game, BUILTINS, FEEDBACK, SAFE_WORD, normalizeCatalog, marketAddress, openAdLink, SpeechPlayer, ReactionQueue};
 });

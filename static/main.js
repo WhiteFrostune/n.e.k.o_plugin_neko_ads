@@ -6,6 +6,7 @@
   let pending = null, stopping = false, switching = null, runtime = 'unknown', recording = false, revision = 0, message = '';
   let runtimeConfirmation = null;
   let changingVoice = false;
+  let contextFailure = '';
   function metadata(plugin) {
     const label = $('plugin-version');
     if (!label) return;
@@ -21,13 +22,15 @@
       runtimeConfirmation = null; message = '插件已关闭，广告与声音已停止。';
     }
     const running = ready || runtime === 'running';
+    const expected = state?.bridge_protocol, reported = state?.desktop?.bridge_protocol;
+    const mismatch = ready && state.desktop_ready && Number.isInteger(expected) && Number.isInteger(reported) && expected !== reported;
     const phase = switching ? switching === 'stop' ? 'disabling' : 'enabling' : stopping ? 'stopping' : pending ? 'starting' : !available ? (active ? 'reconnecting' : 'unavailable') : !ready ? 'disabled' : active ? 'playing' : state.desktop_ready ? 'standby' : 'waiting';
     document.body.dataset.phase = phase;
     const phaseLabel = $('phase-label');
     if (phaseLabel) phaseLabel.textContent = ({enabling:'正在启动', disabling:'正在关闭', starting:'正在开局', stopping:'正在结束', reconnecting:'正在重连', unavailable:'等待连接', disabled:'未启用', playing:'游戏进行中', standby:'已启用 · 待命', waiting:'等待主界面'})[phase];
     $('enable').disabled = !!switching || !['running', 'stopped'].includes(runtime);
     $('enable').textContent = switching ? switching === 'stop' ? '正在关闭插件……' : '正在启动插件……' : running ? '一键关闭插件' : '一键启动插件';
-    $('start').disabled = !ready || !state.desktop_ready || active || !!pending || stopping || !!switching;
+    $('start').disabled = !ready || !state.desktop_ready || mismatch || active || !!pending || stopping || !!switching;
     $('stop').disabled = (!active && !pending) || stopping || !!switching;
     $('start').textContent = pending ? '杂鱼♡准备好挨广告吧……' : '杂鱼♡让本喵占领桌面！';
     if (phaseLabel && !pending) $('start').textContent = '杂鱼♡让本喵\n占领桌面！';
@@ -39,7 +42,8 @@
     const count = preparation ? preparation.ready + '/' + preparation.total : '0/9';
     $('voice-status').textContent = !ready ? '插件启动后静默准备语音。' : state.voice_enabled === false ? '语音已关闭' : !preparation || preparation.state === 'waiting' ? '等待当前猫娘，语音会静默准备。' :
       preparation.state === 'ready' ? '当前猫娘语音已就绪 · ' + count : preparation.state === 'paused' ? '语音准备已暂停 · ' + count :
-      ['partial','unavailable'].includes(preparation.state) ? '部分语音暂未就绪 · ' + count + '，可重试。' : '正在静默准备语音 · ' + count;
+      preparation.state === 'unavailable' || preparation.state === 'partial' && preparation.ready === 0 ? '当前猫娘语音暂不可用，游戏会显示文字反馈。' :
+      preparation.state === 'partial' ? '部分语音暂未就绪 · ' + count + '，可重试。' : '正在静默准备语音 · ' + count;
     if (phaseLabel && ready && state.voice_enabled !== false && preparation && preparation.state === 'ready') $('voice-status').textContent = '语音已就绪 · ' + count;
     $('voice-retry').disabled = !ready || !state.voice_enabled || !preparation || !['paused','partial','unavailable'].includes(preparation.state);
     $('status').textContent = ({
@@ -47,22 +51,52 @@
       disabling: '正在关闭插件，本局广告与声音一并结束……',
       starting: '正在开局，正在确认主界面和退出快捷键……', stopping: '正在结束本局……',
       reconnecting: '连接暂时中断，正在重连。可在猫娘主界面输入安全词或按退出快捷键。',
-      unavailable: runtime === 'running' ? '插件正在运行，等待控制页连接恢复。' : '插件服务连接不可用，请检查宿主是否正在运行。',
+      unavailable: contextFailure || '正在查询插件状态……',
       disabled: '插件未启动，点击上方“一键启动插件”进入待机。',
       playing: '游戏进行中', standby: '插件已启用 · 待机中', waiting: '插件已启用 · 等待猫娘主界面连接',
     })[phase];
     const name = state && (active ? state.character : state.desktop && state.desktop.character);
-    $('connection').textContent = name ? '当前猫娘：' + name : ready ? '请打开或重新加载猫娘主界面后再开局。' : '';
+    $('connection').textContent = mismatch ? '猫娘主界面的脚本版本与插件不兼容，请从 N.E.K.O. 托盘菜单重新加载。' :
+      name && ready ? '当前猫娘：' + name : ready ? '插件已启动，尚未收到主界面的连接。请打开或重新加载猫娘主界面。' : '';
     $('message').textContent = message;
   }
   async function request(path, options = {}, timeout = 6000) {
     const abort = new AbortController(), timer = setTimeout(() => abort.abort(), timeout);
     try {
-      const response = await fetch(path.startsWith('/plugin/') ? path : base + path, {...options, signal: abort.signal, cache: 'no-store'});
+      const url = path.startsWith('/plugin/') || path === '/security/csrf-token' ? path : base + path;
+      const response = await fetch(url, {...options, signal: abort.signal, cache: 'no-store'});
       const data = await response.json();
-      if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : '插件连接不可用');
+      if (!response.ok) {
+        const detail = data.detail;
+        const csrf = response.status === 403 && detail?.error_code === 'csrf_validation_failed';
+        const message = csrf ? '宿主未通过插件开关请求的安全校验。请刷新面板后重试，或在插件管理中操作。' :
+          typeof detail === 'string' ? detail : detail?.message || detail?.detail || '插件连接不可用';
+        throw Object.assign(new Error(message), {httpStatus:response.status, refreshToken:csrf && detail.csrf_failure === 'token'});
+      }
       return data;
     } finally { clearTimeout(timer); }
+  }
+  async function lifecycle(action) {
+    async function send() {
+      const headers = {'Content-Type':'application/json'};
+      let token;
+      try {
+        token = await request('/security/csrf-token');
+      } catch (error) {
+        // Earlier hosts have no token endpoint. Their own lifecycle rules still apply.
+        if (error.httpStatus !== 404) throw new Error('无法取得宿主的开关校验令牌，请稍后重试。');
+      }
+      if (token) {
+        if (typeof token.csrf_token !== 'string' || !token.csrf_token) throw new Error('宿主没有返回有效的开关校验令牌。');
+        headers['X-CSRF-Token'] = token.csrf_token;
+      }
+      return request('/plugin/neko_ads/' + action, {method:'POST', headers, body:'{}'}, 20000);
+    }
+    try { return await send(); }
+    catch (error) {
+      if (!error.refreshToken) throw error;
+      return send();
+    }
   }
   async function command(command, payload) {
     const data = await request('/action/desktop_command', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({kind:'panel',surface_id:'main',args:{command,payload}})});
@@ -86,7 +120,7 @@
       state = next; available = true; runtime = state.ready ? 'running' : 'stopped';
       if (!changingVoice) $('voice').checked = state.voice_enabled !== false;
       if (state.active && !recording) { selected = state.shortcut; notice(); }
-    } catch (_) {
+    } catch (error) {
       if (version !== revision) return;
       available = false;
       try {
@@ -99,6 +133,13 @@
           runtime = 'stopped'; available = true; state = {...state, ready: false, active: false};
         } else runtime = 'unknown';
       } catch (_) { if (version === revision) runtime = 'unknown'; }
+      if (version === revision) {
+        contextFailure = runtime === 'running'
+          ? error.name === 'AbortError' || error.httpStatus === 504
+            ? '插件正在运行，但状态查询超时，面板会自动重试。'
+            : '插件正在运行，但宿主未返回可用的控制状态，面板会自动重试。'
+          : '暂时无法确认插件状态，请检查 N.E.K.O. 是否正在运行。';
+      }
     }
     finally { if (version === revision) render(); setTimeout(update, 2000); }
   }
@@ -113,7 +154,7 @@
         // Retire an active or in-flight round before stopping its process.
         try { const next = await command('stop', {round_id:old}); if (version === revision) state = next; } catch (_) {}
       }
-      const result = await request('/plugin/neko_ads/' + action, {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'}, 20000);
+      const result = await lifecycle(action);
       if (result.success !== true) throw new Error(action === 'stop' ? '插件关闭未成功，请查看插件日志。' : '插件启动未成功，请查看插件日志。');
       if (version !== revision) return;
       completed = true;

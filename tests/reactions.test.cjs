@@ -20,6 +20,17 @@ test('cooldown waits without cancelling audio; old pending reactions expire',asy
   h.speaker.request('streak');await h.advance(5000);h.releases.shift()();await flush();
   assert.equal(h.played.length,2);h.speaker.clear();
 });
+test('a recent short reaction replaces a slower pending line without cutting current audio', async()=>{
+  const h=queue();h.speaker.request('start');h.releases.shift()();await flush();
+  h.speaker.request('view');h.speaker.request('fake',{gap:750,maxAge:1500});
+  await h.advance(749);assert.equal(h.played.length,1);
+  await h.advance(1);assert.deepEqual(h.played.map(x=>x.event),['start','fake']);
+  h.speaker.request('dodge',{gap:750,maxAge:1500});
+  await h.advance(1501);h.releases.shift()();await flush();
+  assert.deepEqual(h.played.map(x=>x.event),['start','fake']);
+  assert.equal(h.cancelled,0);
+  h.speaker.clear();
+});
 test('exit invalidates waiting and in-flight work, including late completion',async()=>{
   const h=queue();h.speaker.request('start');h.speaker.request('fake');const old=h.played[0].valid;
   h.speaker.clear();assert.equal(old(),false);h.releases.shift()();await flush();await h.advance(10000);

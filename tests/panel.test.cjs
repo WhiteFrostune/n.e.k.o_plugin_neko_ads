@@ -6,8 +6,8 @@ const vm = require('node:vm');
 const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
 
 // Run the control page itself; replace only the DOM, clock and host transport.
-async function panel(initial = {}) {
-  let now = 0, timerId = 0, uuid = 0, offline = false, contextDown = false, enableError = false, disableError = false;
+async function panel(initial = {}, csrf = {}) {
+  let now = 0, timerId = 0, uuid = 0, offline = false, contextDown = false, contextTimeout = false, enableError = false, disableError = false;
   let installedVersion = '0.1.0';
   const timers = new Map(), calls = [], nodes = {}, held = {context: [], start: [], enable: [], disable: []};
   for (const id of ['enable', 'shortcut', 'voice', 'voice-status', 'voice-retry', 'notice', 'start', 'stop', 'status', 'connection', 'message', 'plugin-version', 'phase-label']) nodes[id] = {setAttribute() {}};
@@ -16,9 +16,24 @@ async function panel(initial = {}) {
   const state = {ready: true, active: false, desktop_ready: true, desktop: {client_id: 'owner', character: '当前猫娘'},
     character: null, round_id: null, shortcut: 'Ctrl+Shift+1', voice_enabled: true, ...initial};
   const answer = data => ({ok: true, json: async () => data});
+  const csrfRequests = [];
+  let tokenReads = 0;
   async function fetch(url, options) {
     if (offline) throw new Error('offline');
     let kind = 'context', data;
+    if (url === '/security/csrf-token') {
+      tokenReads++;
+      if (!csrf.enabled) return {ok:false, status:404, json:async () => ({detail:'Not Found'})};
+      return answer({csrf_token:'host-token-' + tokenReads});
+    }
+    if (csrf.enabled && ['/plugin/neko_ads/start','/plugin/neko_ads/stop'].includes(url)) {
+      const token = options.headers['X-CSRF-Token'];
+      csrfRequests.push({url, token});
+      if (token !== 'host-token-' + tokenReads || csrf.failures > 0) {
+        if (csrf.failures > 0) csrf.failures--;
+        return {ok:false, status:403, json:async () => ({detail:{error_code:'csrf_validation_failed', csrf_failure:'token'}})};
+      }
+    }
     if (url === '/plugin/neko_ads/start') {
       calls.push({command: 'enable'}); kind = 'enable';
       if (enableError) return {ok: false, json: async () => ({detail: '启动权限不足，请在宿主插件管理中操作。'})};
@@ -36,6 +51,7 @@ async function panel(initial = {}) {
       if (command === 'voice') state.voice_enabled = payload.enabled;
       data = {result: {data: {...state}}};
     } else {
+      if (contextTimeout) throw Object.assign(new Error('timeout'), {name:'AbortError'});
       if (contextDown) return {ok: false, json: async () => ({detail: 'Plugin not running'})};
       data = {plugin: {version: installedVersion}, state: state.ready ? {...state} : {}};
     }
@@ -48,10 +64,11 @@ async function panel(initial = {}) {
     setTimeout: (fn, ms) => { const id = ++timerId; timers.set(id, {fn, at: now + ms}); return id; }, clearTimeout: id => timers.delete(id),
   });
   await flush();
-  return {nodes, state, calls, get phase() { return document.body.dataset.phase; }, offline(value) { offline = value; },
+  return {nodes, state, calls, csrfRequests, get phase() { return document.body.dataset.phase; }, offline(value) { offline = value; },
     installedVersion(value) { installedVersion = value; },
     start: () => nodes.start.onclick(), stop: () => nodes.stop.onclick(), enable: () => nodes.enable.onclick(),
     contextDown(value) { contextDown = value; }, enableError(value) { enableError = value; }, disableError(value) { disableError = value; },
+    contextTimeout(value) { contextTimeout = value; },
     hold(kind) {
       let release, reject;
       held[kind].push(data => new Promise((resolve, fail) => { release = (value = data) => resolve(answer(value)); reject = fail; }));
@@ -70,6 +87,29 @@ async function panel(initial = {}) {
     },
   };
 }
+
+test('Steam lifecycle requests use the host token and retry a stale token once', async () => {
+  const h = await panel({}, {enabled:true, failures:1});
+  await h.enable();
+  assert.equal(h.phase,'disabled');
+  assert.equal(h.state.ready,false);
+  await h.enable();
+  assert.equal(h.phase,'standby');
+  assert.equal(h.state.active,false);
+  assert.deepEqual(h.csrfRequests, [
+    {url:'/plugin/neko_ads/stop', token:'host-token-1'},
+    {url:'/plugin/neko_ads/stop', token:'host-token-2'},
+    {url:'/plugin/neko_ads/start', token:'host-token-3'},
+  ]);
+});
+
+test('a second token rejection keeps the plugin running and shows the security error', async () => {
+  const h = await panel({}, {enabled:true, failures:2});
+  await h.enable();
+  assert.equal(h.phase,'standby');
+  assert.equal(h.csrfRequests.length,2);
+  assert.match(h.nodes.message.textContent,/安全校验/);
+});
 
 test('version follows host metadata updates without starting a game', async () => {
   const h = await panel();
@@ -97,6 +137,23 @@ test('opening the panel and polling cannot start a game', async () => {
   const h = await panel(); await h.advance(20000);
   assert.equal(h.phase, 'standby'); assert.equal(h.calls.length, 0);
   assert.equal(h.nodes.start.disabled, false); assert.equal(h.nodes.stop.disabled, true);
+});
+
+test('panel distinguishes a running host timeout from missing or incompatible renderer', async () => {
+  const h = await panel({desktop_ready:false, desktop:null, bridge_protocol:1});
+  assert.match(h.nodes.connection.textContent, /尚未收到主界面的连接/);
+  Object.assign(h.state, {desktop_ready:true, desktop:{client_id:'owner', character:'当前猫娘', bridge_protocol:2}});
+  await h.advance(2000);
+  assert.equal(h.nodes.start.disabled,true);
+  assert.equal(h.nodes.enable.disabled,false);
+  assert.match(h.nodes.connection.textContent, /脚本版本.*不兼容/);
+  h.contextTimeout(true);
+  await h.advance(2000);
+  assert.match(h.nodes.status.textContent, /插件正在运行.*查询超时/);
+  h.contextTimeout(false);
+  h.state.desktop.bridge_protocol = null;
+  await h.advance(2000);
+  assert.equal(h.nodes.start.disabled,false, 'older bridge can connect without declaring a protocol');
 });
 
 test('unavailable plugin and missing renderer both block starting', async () => {
