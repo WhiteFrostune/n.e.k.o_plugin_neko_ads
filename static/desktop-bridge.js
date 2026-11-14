@@ -7,7 +7,7 @@
   const main = !/\/(?:chat|chat_full|subtitle)(?:\/|$)/.test(location.pathname) && !window.nekoChatWindow;
   const client = crypto.randomUUID(), storage = 'neko-ads-custom-exit-shortcut', roundStorage = 'neko-ads-current-round';
   const retired = new Set();
-  const assetBuild = '0.3.0', bridgeProtocol = 1;
+  const assetBuild = '0.3.1', bridgeProtocol = 1;
   const shortVoiceVariants = new Map([
     ['fake', ['fake', 'fakejp', 'fakeagain']],
     ['dodge', ['dodge', 'dodgecatch', 'dodgeslow']],
