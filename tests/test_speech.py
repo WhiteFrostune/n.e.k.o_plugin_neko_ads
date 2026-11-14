@@ -3,7 +3,6 @@ import threading
 from types import SimpleNamespace
 
 import pytest
-
 from plugin.plugins.neko_ads.speech import VoiceCache, synthesize_feedback
 
 

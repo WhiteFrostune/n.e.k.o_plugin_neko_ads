@@ -10,7 +10,6 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-
 from plugin.plugins.neko_ads.desktop import DesktopController
 from plugin.plugins.neko_ads.session import AdSession
 from plugin.server.routes import plugin_ui

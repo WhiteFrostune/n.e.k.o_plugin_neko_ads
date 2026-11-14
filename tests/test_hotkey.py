@@ -3,7 +3,6 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-
 from plugin.plugins.neko_ads import hotkey
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows global key")
